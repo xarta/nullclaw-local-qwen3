@@ -1,10 +1,45 @@
 #!/bin/sh
 # pre-commit: enforce zig fmt on all source files.
 # Activate: git config core.hooksPath .githooks
+#
+# Runs via:
+#   1. Local `zig` if found in PATH
+#   2. Docker image `nullclaw-zig-dev` if available
+#      Build once with: docker build -f Dockerfile.dev -t nullclaw-zig-dev .
+#   3. Skips with a warning if neither is available
 
-output=$(zig fmt --check src/ 2>&1)
-if [ $? -ne 0 ]; then
-    echo "zig fmt check failed. Run: zig fmt src/"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+run_fmt_check() {
+    output=$(zig fmt --check src/ 2>&1)
     echo "$output"
+    return $?
+}
+
+run_fmt_check_docker() {
+    output=$(docker run --rm \
+        -v "$REPO_ROOT":/app \
+        -w /app \
+        nullclaw-zig-dev \
+        zig fmt --check src/ 2>&1)
+    echo "$output"
+    return $?
+}
+
+if command -v zig >/dev/null 2>&1; then
+    run_fmt_check
+    rc=$?
+elif docker image inspect nullclaw-zig-dev >/dev/null 2>&1; then
+    run_fmt_check_docker
+    rc=$?
+else
+    echo "⚠️  pre-commit: neither 'zig' nor Docker image 'nullclaw-zig-dev' found."
+    echo "   Skipping fmt check. To enable, build the image once:"
+    echo "     docker build -f Dockerfile.dev -t nullclaw-zig-dev ."
+    exit 0
+fi
+
+if [ $rc -ne 0 ]; then
+    echo "zig fmt check failed. Run: zig fmt src/"
     exit 1
 fi

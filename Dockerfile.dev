@@ -1,0 +1,11 @@
+# Minimal Zig development image for local test runs.
+# Used by .githooks/pre-push to run `zig build test` without needing Zig installed locally.
+#
+# Build once:
+#   docker build -f Dockerfile.dev -t nullclaw-zig-dev .
+#
+# After that the pre-push hook uses it automatically.
+
+FROM alpine:3.23
+RUN apk add --no-cache zig musl-dev
+WORKDIR /app

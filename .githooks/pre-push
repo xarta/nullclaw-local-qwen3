@@ -1,10 +1,43 @@
 #!/bin/sh
 # pre-push: run the full test suite before pushing.
 # Activate: git config core.hooksPath .githooks
+#
+# Runs via:
+#   1. Local `zig` if found in PATH
+#   2. Docker image `nullclaw-zig-dev` if available
+#      Build once with: docker build -f Dockerfile.dev -t nullclaw-zig-dev .
+#   3. Skips with a warning if neither is available
 
-echo "Running tests..."
-zig build test --summary all 2>&1
-if [ $? -ne 0 ]; then
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+run_tests() {
+    echo "Running tests..."
+    zig build test --summary all 2>&1
+}
+
+run_tests_docker() {
+    echo "Running tests (via Docker nullclaw-zig-dev)..."
+    docker run --rm \
+        -v "$REPO_ROOT":/app \
+        -w /app \
+        nullclaw-zig-dev \
+        zig build test --summary all 2>&1
+}
+
+if command -v zig >/dev/null 2>&1; then
+    run_tests
+    rc=$?
+elif docker image inspect nullclaw-zig-dev >/dev/null 2>&1; then
+    run_tests_docker
+    rc=$?
+else
+    echo "⚠️  pre-push: neither 'zig' nor Docker image 'nullclaw-zig-dev' found."
+    echo "   Skipping test run. To enable, build the image once:"
+    echo "     docker build -f Dockerfile.dev -t nullclaw-zig-dev ."
+    exit 0
+fi
+
+if [ $rc -ne 0 ]; then
     echo "Tests failed. Fix before pushing."
     exit 1
 fi
