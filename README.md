@@ -1,3 +1,22 @@
+> **⚠️ PERSONAL FORK — AI-ASSISTED — USE AT YOUR OWN RISK**
+>
+> This is a personal fork of [nullclaw/nullclaw](https://github.com/nullclaw/nullclaw) maintained for
+> a specific private homelab setup. The changes here were developed with AI assistance and have not
+> been reviewed or endorsed by the upstream maintainers.
+> Dave IS NOT a Zig developer!  No insight into how some of this works.
+>
+> **What's different from upstream:**
+> - Adds a `qwen3-local` provider type for self-hosted Qwen3 models via a vLLM/OpenAI-compatible endpoint (see [Qwen3 Local Provider](#qwen3-local-provider) below)
+> - Two new per-model config flags: `no_think` and `strip_think_tags`
+> - The [Configuration](#configuration) example below has been updated to show these additions
+> - `Dockerfile` updated to use Alpine runtime (fixes musl/glibc mismatch with upstream's distroless image) + `root.pem` slot for a private CA cert
+> - `docker-compose.yml` example included for running a named agent instance
+>
+> Branches: `qwen3-provider` (Qwen3 provider), `memory` (memory bug fix in progress).
+> Upstream changes are tracked on the read-only `nullclaw-main-copy` branch.
+
+---
+
 <p align="center">
   <img src="nullclaw.png" alt="nullclaw" width="200" />
 </p>
@@ -191,7 +210,19 @@ Config: `~/.nullclaw/config.json` (created by `onboard`)
     "providers": {
       "openrouter": { "api_key": "sk-or-..." },
       "groq": { "api_key": "gsk_..." },
-      "anthropic": { "api_key": "sk-ant-...", "base_url": "https://api.anthropic.com" }
+      "anthropic": { "api_key": "sk-ant-...", "base_url": "https://api.anthropic.com" },
+
+      "qwen3-local": {
+        "base_url": "https://your-vllm-host:8000/v1",
+        "models": [
+          {
+            "id": "YourOrg/Your-Qwen3-Model",
+            "name": "Qwen3 (local)",
+            "no_think": true,
+            "strip_think_tags": true
+          }
+        ]
+      }
     }
   },
 
@@ -306,6 +337,96 @@ Config: `~/.nullclaw/config.json` (created by `onboard`)
 }
 ```
 
+### Redacted/partial copy of Dave's configuration
+
+Dave is using Proxmox VM/LXC etc. and certificates and LiteLLM etc. with firewalls/filtering/API-broker external to the VM.
+LiteLLM presents public model names hence "RTX5090-Qwen3-30B-A3B-GPTQ-Int4".
+Only simple system prompt shown here.
+
+```json
+{
+  "default_provider": "qwen3-local:https://litellm.REDACTED.xarta.co.uk/v1",
+  "default_temperature": 0.7,
+
+  "models": {
+    "providers": {
+      "qwen3-local:https://litellm.REDACTED.xarta.co.uk/v1": {
+        "api_key": "REDACTED",
+        "models": [
+          {
+            "id": "MiniMax-M2.5",
+            "name": "MiniMax M2.5"
+          },
+          {
+            "id": "RTX5090-Qwen3-30B-A3B-GPTQ-Int4",
+            "name": "Qwen3 30B A3B (local)",
+            "no_think": true,
+            "strip_think_tags": true
+          }
+        ]
+      }
+    }
+  },
+
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "RTX5090-Qwen3-30B-A3B-GPTQ-Int4"
+      }
+    },
+    "list": [
+      {
+        "id": "testy",
+        "default": true,
+        "system_prompt": "You are a helpful assistant."
+      }
+    ]
+  },
+
+  "gateway": {
+    "port": 3000,
+    "host": "0.0.0.0",
+    "allow_public_bind": true
+  },
+
+  "autonomy": {
+    "level": "supervised",
+    "workspace_only": true,
+    "max_actions_per_hour": 20,
+    "max_cost_per_day_cents": 500
+  },
+
+  "memory": {
+    "backend": "sqlite",
+    "auto_save": true,
+    "embedding_provider": "custom:https://litellm.REDACTED.xarta.co.uk/v1",
+    "embedding_model": "text-embedding-3-small",
+    "embedding_dimensions": 1536
+  },
+
+  "tunnel": { "provider": "none" },
+  "secrets": { "encrypt": true },
+  "identity": { "format": "openclaw" },
+
+  "channels": {
+    "telegram": {
+      "accounts": {
+        "main": {
+          "bot_token": "REDACTED:REDACTED",
+          "allow_from": ["REDACTED"]
+        }
+      }
+    }
+  },
+
+  "security": {
+    "sandbox": { "backend": "auto" },
+    "resources": { "max_memory_mb": 256, "max_cpu_percent": 80 },
+    "audit": { "enabled": true, "retention_days": 90 }
+  }
+}
+```
+
 ## Gateway API
 
 | Endpoint | Method | Auth | Description |
@@ -389,6 +510,46 @@ nullclaw uses **CalVer** (`YYYY.M.D`) for releases — e.g. `v2026.2.20`.
 - **Tag format:** `vYYYY.M.D` (one release per day max; patch suffix `vYYYY.M.D.N` if needed)
 - **No stability guarantees yet** — the project is pre-1.0, config and CLI may change between releases
 - **`nullclaw --version`** prints the current version
+
+## Qwen3 Local Provider
+
+> **Fork addition** — not in upstream nullclaw.
+
+The `qwen3-local` provider wraps the standard OpenAI-compatible provider with Qwen3-specific
+behaviour. Qwen3 models support an explicit "thinking" mode that emits `<think>...</think>` blocks
+before the actual response. Depending on your use case you may want to suppress this entirely or
+strip the tags from the output.
+
+### Why this exists
+
+When running a local Qwen3 model (e.g. via [vLLM](https://github.com/vllm-project/vllm)) behind
+an OpenAI-compatible endpoint, the model always has thinking enabled by default. For conversational
+or channel-facing agents the think blocks add latency and noise. This provider lets you disable
+them at the config level without touching any code.
+
+### How it works
+
+| Flag | Effect |
+|---|---|
+| `no_think: true` | Prepends `/no_think\n` to every user message, asking the model to skip thinking mode entirely |
+| `strip_think_tags: true` | Strips any leading `<think>...</think>` block (including empty ones) from the response before it reaches the agent or channel. Works on both streaming and non-streaming responses |
+| Both `true` | `/no_think` is sent **and** any residual think block is stripped — belt and braces |
+
+Both flags default to `false`. Set them per model entry in config (see [Configuration](#configuration)).
+
+### Provider key format
+
+The provider type is identified by the key prefix `qwen3-local:` followed by the base URL:
+
+```json
+"qwen3-local": {
+  "base_url": "http://your-vllm-host:8000/v1"
+}
+```
+
+See the full example in [Configuration](#configuration).
+
+---
 
 ## Contributing
 
