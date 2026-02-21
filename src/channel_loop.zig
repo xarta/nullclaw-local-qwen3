@@ -73,6 +73,16 @@ pub const ChannelRuntime = struct {
         else
             null;
 
+        // Optional memory backend (created first so tools can be wired to it)
+        var mem_opt: ?memory_mod.Memory = null;
+        const db_path = std.fs.path.joinZ(allocator, &.{ config.workspace_dir, "memory.db" }) catch null;
+        defer if (db_path) |p| allocator.free(p);
+        if (db_path) |p| {
+            if (memory_mod.createMemory(allocator, config.memory.backend, p)) |mem| {
+                mem_opt = mem;
+            } else |_| {}
+        }
+
         // Tools
         const tools = tools_mod.allTools(allocator, config.workspace_dir, .{
             .http_enabled = config.http_request.enabled,
@@ -82,18 +92,9 @@ pub const ChannelRuntime = struct {
             .agents = config.agents,
             .fallback_api_key = config.defaultProviderKey(),
             .tools_config = config.tools,
+            .memory = mem_opt,
         }) catch &.{};
         errdefer if (tools.len > 0) allocator.free(tools);
-
-        // Optional memory backend
-        var mem_opt: ?memory_mod.Memory = null;
-        const db_path = std.fs.path.joinZ(allocator, &.{ config.workspace_dir, "memory.db" }) catch null;
-        defer if (db_path) |p| allocator.free(p);
-        if (db_path) |p| {
-            if (memory_mod.createMemory(allocator, config.memory.backend, p)) |mem| {
-                mem_opt = mem;
-            } else |_| {}
-        }
 
         // Noop observer (heap for vtable stability)
         const noop_obs = try allocator.create(observability.NoopObserver);
