@@ -3,6 +3,8 @@ const Allocator = std.mem.Allocator;
 const root = @import("root.zig");
 const bus = @import("../bus.zig");
 
+const log = std.log.scoped(.dispatch);
+
 /// Message dispatch — routes incoming ChannelMessages to the agent,
 /// routes agent responses back to the originating channel.
 ///
@@ -142,16 +144,20 @@ pub fn runOutboundDispatcher(
     registry: *const ChannelRegistry,
     stats: *DispatchStats,
 ) void {
+    log.info("outbound dispatcher started", .{});
     while (event_bus.consumeOutbound()) |msg| {
         defer msg.deinit(allocator);
+        log.info("dispatcher: routing msg to channel='{s}' chat='{s}'", .{ msg.channel, msg.chat_id });
 
         if (registry.findByName(msg.channel)) |channel| {
-            channel.send(msg.chat_id, msg.content) catch {
+            channel.send(msg.chat_id, msg.content) catch |err| {
+                log.err("dispatcher: send failed for channel '{s}': {}", .{ msg.channel, err });
                 _ = stats.errors.fetchAdd(1, .monotonic);
                 continue;
             };
             _ = stats.dispatched.fetchAdd(1, .monotonic);
         } else {
+            log.warn("dispatcher: no channel registered for '{s}'", .{msg.channel});
             _ = stats.channel_not_found.fetchAdd(1, .monotonic);
         }
     }

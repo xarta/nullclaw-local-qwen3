@@ -86,6 +86,43 @@ pub fn completeWithSystem(allocator: std.mem.Allocator, cfg: anytype, system_pro
     return try extractContent(allocator, response_body);
 }
 
+/// Like completeWithSystem but takes a fully-resolved URL directly.
+/// Used by subagent threads where the provider URL must be computed at
+/// runtime (e.g. qwen3-local: prefix extraction) rather than via the
+/// static providerUrl() map.
+pub fn completeAtUrl(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    api_key: ?[]const u8,
+    model: []const u8,
+    system_prompt: []const u8,
+    prompt: []const u8,
+    temperature: f64,
+    max_tokens: u32,
+) ![]const u8 {
+    const body_str = try buildRequestBodyWithSystem(allocator, model, system_prompt, prompt, temperature, max_tokens);
+    defer allocator.free(body_str);
+
+    // Use curl subprocess (same as all other provider calls) to avoid
+    // std.http.Client TLS issues in the container environment.
+    var headers_buf: [2][]const u8 = undefined;
+    var n_headers: usize = 0;
+    headers_buf[n_headers] = "Content-Type: application/json";
+    n_headers += 1;
+
+    var auth_header_buf: [512]u8 = undefined;
+    if (api_key) |key| {
+        const auth_val = std.fmt.bufPrint(&auth_header_buf, "Authorization: Bearer {s}", .{key}) catch return error.NoApiKey;
+        headers_buf[n_headers] = auth_val;
+        n_headers += 1;
+    }
+
+    const response_body = try http_util.curlPost(allocator, url, body_str, headers_buf[0..n_headers]);
+    defer allocator.free(response_body);
+
+    return try extractContent(allocator, response_body);
+}
+
 /// Provider URL mapping for the legacy complete() function.
 pub fn providerUrl(provider_name: []const u8) []const u8 {
     const map = std.StaticStringMap([]const u8).initComptime(.{

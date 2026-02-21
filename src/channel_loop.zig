@@ -16,6 +16,8 @@ const mcp = @import("mcp.zig");
 const voice = @import("voice.zig");
 const health = @import("health.zig");
 const daemon = @import("daemon.zig");
+const subagent_mod = @import("subagent.zig");
+const bus_mod = @import("bus.zig");
 
 const log = std.log.scoped(.channel_loop);
 
@@ -53,9 +55,10 @@ pub const ChannelRuntime = struct {
     tools: []const tools_mod.Tool,
     mem: ?memory_mod.Memory,
     noop_obs: *observability.NoopObserver,
+    subagent_manager: *subagent_mod.SubagentManager,
 
     /// Initialize the runtime from config — mirrors main.zig:702-786 setup.
-    pub fn init(allocator: std.mem.Allocator, config: *const Config) !*ChannelRuntime {
+    pub fn init(allocator: std.mem.Allocator, config: *const Config, bus: ?*bus_mod.Bus) !*ChannelRuntime {
         // Provider — heap-allocated for vtable pointer stability
         const holder = try allocator.create(ProviderHolder);
         errdefer allocator.destroy(holder);
@@ -85,6 +88,12 @@ pub const ChannelRuntime = struct {
             }
         }
 
+        // SubagentManager — heap-allocated so pointer stays valid for tool lifetime
+        const sub_mgr = try allocator.create(subagent_mod.SubagentManager);
+        errdefer allocator.destroy(sub_mgr);
+        sub_mgr.* = subagent_mod.SubagentManager.init(allocator, config, bus, .{});
+        errdefer sub_mgr.deinit();
+
         // Tools
         const tools = tools_mod.allTools(allocator, config.workspace_dir, .{
             .http_enabled = config.http_request.enabled,
@@ -95,6 +104,7 @@ pub const ChannelRuntime = struct {
             .fallback_api_key = config.defaultProviderKey(),
             .tools_config = config.tools,
             .memory = mem_opt,
+            .subagent_manager = sub_mgr,
         }) catch &.{};
         errdefer if (tools.len > 0) allocator.free(tools);
 
@@ -116,6 +126,7 @@ pub const ChannelRuntime = struct {
             .tools = tools,
             .mem = mem_opt,
             .noop_obs = noop_obs,
+            .subagent_manager = sub_mgr,
         };
         return self;
     }
@@ -125,6 +136,8 @@ pub const ChannelRuntime = struct {
         self.session_mgr.deinit();
         if (self.tools.len > 0) alloc.free(self.tools);
         alloc.destroy(self.noop_obs);
+        self.subagent_manager.deinit();
+        alloc.destroy(self.subagent_manager);
         alloc.destroy(self.provider_holder);
         alloc.destroy(self);
     }
@@ -208,6 +221,10 @@ pub fn runTelegramLoop(
             // Session key
             var key_buf: [128]u8 = undefined;
             const session_key = std.fmt.bufPrint(&key_buf, "telegram:{s}", .{msg.sender}) catch msg.sender;
+
+            // Update subagent routing so spawn/reflect results go back to this chat
+            runtime.subagent_manager.current_channel = "telegram";
+            runtime.subagent_manager.current_chat_id = msg.sender;
 
             // Typing indicator
             typing.start(msg.sender);
