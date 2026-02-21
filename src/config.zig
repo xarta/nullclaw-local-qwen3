@@ -54,6 +54,7 @@ pub const McpServerConfig = config_types.McpServerConfig;
 pub const ModelPricing = config_types.ModelPricing;
 pub const ToolsConfig = config_types.ToolsConfig;
 pub const ProviderEntry = config_types.ProviderEntry;
+pub const ModelEntry = config_types.ModelEntry;
 pub const AudioMediaConfig = config_types.AudioMediaConfig;
 
 // ── Top-level Config ────────────────────────────────────────────
@@ -135,6 +136,37 @@ pub const Config = struct {
             if (std.mem.eql(u8, e.name, name)) return e.base_url;
         }
         return null;
+    }
+
+    /// Return true when the default model declares `no_think: true` in the
+    /// default provider's model list.  Used to configure the Qwen3 local
+    /// provider — set `"no_think": true` on the model entry in config.json.
+    pub fn defaultModelNoThink(self: *const Config) bool {
+        const model_id = self.default_model orelse return false;
+        for (self.providers) |pe| {
+            if (std.mem.eql(u8, pe.name, self.default_provider)) {
+                for (pe.models) |m| {
+                    if (std.mem.eql(u8, m.id, model_id)) return m.no_think;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// Return true when the default model declares `strip_think_tags: true`
+    /// in the default provider's model list.  Set `"strip_think_tags": true`
+    /// on the model entry in config.json to strip `<think>\s*</think>` blocks
+    /// from responses without suppressing chain-of-thought.
+    pub fn defaultModelStripThinkTags(self: *const Config) bool {
+        const model_id = self.default_model orelse return false;
+        for (self.providers) |pe| {
+            if (std.mem.eql(u8, pe.name, self.default_provider)) {
+                for (pe.models) |m| {
+                    if (std.mem.eql(u8, m.id, model_id)) return m.strip_think_tags;
+                }
+            }
+        }
+        return false;
     }
 
     /// Sync flat convenience fields from the nested sub-configs.

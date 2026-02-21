@@ -118,7 +118,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     } else |_| {}
 
     // Create provider via centralized ProviderHolder (concrete struct lives on the stack)
-    var holder = providers.ProviderHolder.fromConfig(allocator, cfg.default_provider, cfg.defaultProviderKey());
+    var holder = providers.ProviderHolder.fromConfig(allocator, cfg.default_provider, cfg.defaultProviderKey(), .{ .qwen3_no_think = cfg.defaultModelNoThink(), .qwen3_strip_think_tags = cfg.defaultModelStripThinkTags() });
     const provider_i: Provider = holder.provider();
 
     const supports_streaming = provider_i.supportsStreaming();

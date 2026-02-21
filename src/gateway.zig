@@ -649,7 +649,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16) !void {
         }
 
         // Build provider holder from configured provider name.
-        holder_opt = providers.ProviderHolder.fromConfig(allocator, cfg.default_provider, cfg.defaultProviderKey());
+        holder_opt = providers.ProviderHolder.fromConfig(allocator, cfg.default_provider, cfg.defaultProviderKey(), .{ .qwen3_no_think = cfg.defaultModelNoThink(), .qwen3_strip_think_tags = cfg.defaultModelStripThinkTags() });
 
         // Build provider vtable from the holder.
         if (holder_opt) |*h| {

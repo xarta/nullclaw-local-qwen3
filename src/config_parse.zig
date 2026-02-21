@@ -761,6 +761,31 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         if (val.object.get("base_url")) |ab| {
                             if (ab == .string) pe.base_url = try self.allocator.dupe(u8, ab.string);
                         }
+                        // Parse the models array: [{"id":"...","name":"...","no_think":true}, ...]
+                        if (val.object.get("models")) |ml| {
+                            if (ml == .array) {
+                                var model_list: std.ArrayListUnmanaged(types.ModelEntry) = .empty;
+                                for (ml.array.items) |mi| {
+                                    if (mi != .object) continue;
+                                    const mid = mi.object.get("id") orelse continue;
+                                    if (mid != .string) continue;
+                                    const mname_v = mi.object.get("name");
+                                    const mname = if (mname_v) |n| (if (n == .string) n.string else mid.string) else mid.string;
+                                    var me = types.ModelEntry{
+                                        .id = try self.allocator.dupe(u8, mid.string),
+                                        .name = try self.allocator.dupe(u8, mname),
+                                    };
+                                    if (mi.object.get("no_think")) |nt| {
+                                        if (nt == .bool) me.no_think = nt.bool;
+                                    }
+                                    if (mi.object.get("strip_think_tags")) |st| {
+                                        if (st == .bool) me.strip_think_tags = st.bool;
+                                    }
+                                    try model_list.append(self.allocator, me);
+                                }
+                                pe.models = try model_list.toOwnedSlice(self.allocator);
+                            }
+                        }
                         try prov_list.append(self.allocator, pe);
                     }
                     self.providers = try prov_list.toOwnedSlice(self.allocator);
