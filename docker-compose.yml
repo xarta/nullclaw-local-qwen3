@@ -1,34 +1,68 @@
+# EXAMPLE DOCKER COMPOSE FOR A NULLCLAW AGENT ON DAVE'S SYSTEM
+
+# Dave is using Dockge stacks in a hardened "OpenClaw" VM on Proxmox,
+# using 2 vlans externally - one for internet access (via NordVPN), and one for 
+# firewalled access to local resources via an LXC container running Caddy for layer 7 filtering,
+# and LiteLLM for model managment (different "teams" and virtual keys) and proxying and so on,
+# and other brokerage using a boundary API gateway so that agents in the VM don't need to have credentials (even encrypted).
+# Inside the VM it runs full-blown OpenClaw, but it seemed useful to run multilple NullClaw agents
+# in separate Dockge stacks as they're so light.
+# Caddy is used inside the VM to route different hostnames to different agent stacks, and also to handle TLS termination.
+
+# Each stack can use a different local path in the VM.
+# There can be variations on providers, skills, tools, access rights and so on.
+
+
+# nullclaw agent: testy
+# Gateway accessible at: nullclaw-testy.REDACTED.xarta.co.uk (via Caddy)
+# Host port: 19001  (nullclaw agent port range: 19001–19999)
+# Data dir: /mnt/data/nullclaw/testy   (owns .nullclaw/config.json + workspace/)
+#
+# FIRST RUN: build the image —
+#   docker compose -f /mnt/data/stacks/nullclaw-testy/compose.yaml build
+#
+# To add a second agent, copy this stack, increment the port, and point data
+# to a new /mnt/data/nullclaw/<name>/ directory.
+
 services:
-  agent:
-    build: .
-    image: nullclaw:latest
-    profiles: ["agent"]
-    stdin_open: true
-    tty: true
-    env_file:
-      - path: .env
-        required: false
-    volumes:
-      - nullclaw-data:/root/.nullclaw
+  nullclaw-testy:
+    build:
+      context: /mnt/data/ClonedRepos/nullclaw-local-qwen3
+    image: nullclaw:latest          # shared image; all agents use the same build
+    container_name: nullclaw-testy
     restart: unless-stopped
 
-  gateway:
-    build: .
-    image: nullclaw:latest
-    profiles: ["gateway"]
+    # Bind to all interfaces so Caddy (on host LAN IP) can reach it.
+    # Caddy handles TLS termination; nullclaw speaks plain HTTP internally.
     ports:
-      - "8080:8080"
+      - "19001:3000"
+
+    # Load per-agent env vars (LITELLM_API_KEY, etc.).
+    # Each agent stack has its own .env so different agents can use
+    # different LiteLLM virtual keys / teams.
+    # Note: nullclaw reads api_key from config.json, not directly from env.
+    # The .env is the source of truth; config.json mirrors it.
     env_file:
       - path: .env
-        required: false
+        required: true
+
+    # /nullclaw-data is HOME in the container (user 65534/nobody).
+    # Contains .nullclaw/config.json and workspace/.
+    # Host dirs must be owned by 65534:65534 — see PLAN.md.
+    extra_hosts:
+      # *.REDACTED.xarta.co.uk is served by Caddy at [EXAMPLE-IP1].
+      # NordVPN DNS ([EXAMPLE-IP2]) doesn't resolve this private domain,
+      # so we pin it here for all services the container needs to reach.
+      - "litellm.REDACTED.xarta.co.uk:EXAMPLE-IP1"
     volumes:
-      - nullclaw-data:/root/.nullclaw
-    restart: unless-stopped
+      - /mnt/data/nullclaw/testy:/nullclaw-data
+
+    # Override the default CMD to run the gateway daemon
+    command: ["daemon"]
+
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
-
-volumes:
-  nullclaw-data:
+      start_period: 15s
