@@ -173,6 +173,9 @@ pub const Qwen3LocalProvider = struct {
         allocator: std.mem.Allocator,
         buf: std.ArrayListUnmanaged(u8),
         forwarding: bool,
+        /// True after stripping an empty think block when we still need to
+        /// consume leading whitespace from the next arriving chunk(s).
+        eat_leading_ws: bool,
         outer_cb: StreamCallback,
         outer_ctx: *anyopaque,
 
@@ -191,6 +194,7 @@ pub const Qwen3LocalProvider = struct {
                 .allocator = alloc,
                 .buf = .empty,
                 .forwarding = false,
+                .eat_leading_ws = false,
                 .outer_cb = outer_cb,
                 .outer_ctx = outer_ctx,
             };
@@ -219,6 +223,22 @@ pub const Qwen3LocalProvider = struct {
             }
 
             if (self.forwarding) {
+                if (self.eat_leading_ws) {
+                    // Strip leading whitespace from this chunk.
+                    var start: usize = 0;
+                    while (start < chunk.delta.len) : (start += 1) {
+                        switch (chunk.delta[start]) {
+                            ' ', '\t', '\n', '\r' => {},
+                            else => break,
+                        }
+                    }
+                    if (start < chunk.delta.len) {
+                        self.eat_leading_ws = false;
+                        self.outer_cb(self.outer_ctx, StreamChunk.textDelta(chunk.delta[start..]));
+                    }
+                    // If the whole chunk was whitespace, eat_leading_ws stays true.
+                    return;
+                }
                 self.outer_cb(self.outer_ctx, chunk);
                 return;
             }
@@ -248,7 +268,9 @@ pub const Qwen3LocalProvider = struct {
                     }
                 }
                 if (only_ws) {
-                    // Empty think block — strip it plus surrounding whitespace.
+                    // Empty think block — strip it plus any buffered whitespace
+                    // after </think>.  Any remaining whitespace in subsequent
+                    // chunks is handled by eat_leading_ws.
                     const after_close = self.buf.items[OPEN.len + rel + CLOSE.len..];
                     var start: usize = 0;
                     while (start < after_close.len) : (start += 1) {
@@ -262,6 +284,9 @@ pub const Qwen3LocalProvider = struct {
                             self.outer_ctx,
                             StreamChunk.textDelta(after_close[start..]),
                         );
+                    } else {
+                        // No real content yet — eat whitespace from next chunk.
+                        self.eat_leading_ws = true;
                     }
                 } else {
                     // Non-empty think block — forward as-is.
