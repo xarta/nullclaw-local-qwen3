@@ -7,5 +7,5 @@
 # After that the pre-push hook uses it automatically.
 
 FROM alpine:3.23
-RUN apk add --no-cache zig musl-dev
+RUN apk add --no-cache zig musl-dev curl
 WORKDIR /app
