@@ -80,7 +80,9 @@ pub const ChannelRuntime = struct {
         if (db_path) |p| {
             if (memory_mod.createMemory(allocator, config.memory.backend, p)) |mem| {
                 mem_opt = mem;
-            } else |_| {}
+            } else |err| {
+                log.err("createMemory failed: {s}", .{@errorName(err)});
+            }
         }
 
         // Tools

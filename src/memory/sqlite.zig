@@ -35,6 +35,11 @@ pub const SqliteMemory = struct {
             return error.SqliteOpenFailed;
         }
 
+        // Allow up to 5 s of retries when another connection holds a write lock.
+        // Without this, concurrent opens (e.g. gateway + channel_loop threads)
+        // fail immediately with SQLITE_BUSY during schema migration.
+        _ = c.sqlite3_busy_timeout(db, 5000);
+
         var self_ = Self{ .db = db, .allocator = allocator };
         try self_.configurePragmas();
         try self_.migrate();
