@@ -626,9 +626,9 @@ pub fn saveJobs(scheduler: *const CronScheduler) !void {
     try w.writeAll("[\n");
     for (scheduler.jobs.items, 0..) |job, i| {
         try w.writeAll("  {");
-        try w.print("\"id\":\"{s}\",", .{job.id});
-        try w.print("\"expression\":\"{s}\",", .{job.expression});
-        try w.print("\"command\":\"{s}\",", .{job.command});
+        try w.print("\"id\":{f},", .{std.json.fmt(job.id, .{})});
+        try w.print("\"expression\":{f},", .{std.json.fmt(job.expression, .{})});
+        try w.print("\"command\":{f},", .{std.json.fmt(job.command, .{})});
         try w.print("\"next_run_secs\":{d},", .{job.next_run_secs});
         if (job.last_run_secs) |lrs| {
             try w.print("\"last_run_secs\":{d},", .{lrs});
@@ -636,7 +636,7 @@ pub fn saveJobs(scheduler: *const CronScheduler) !void {
             try w.writeAll("\"last_run_secs\":null,");
         }
         if (job.last_status) |ls| {
-            try w.print("\"last_status\":\"{s}\",", .{ls});
+            try w.print("\"last_status\":{f},", .{std.json.fmt(ls, .{})});
         } else {
             try w.writeAll("\"last_status\":null,");
         }
