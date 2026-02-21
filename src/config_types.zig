@@ -25,12 +25,27 @@ pub const SandboxBackend = enum {
     none,
 };
 
+// ── Model entry (for models list within a provider) ───────────
+
+pub const ModelEntry = struct {
+    id: []const u8,
+    name: []const u8,
+    /// When true, the Qwen3 local provider prepends `/no_think\n` to user
+    /// messages for this model, disabling chain-of-thought.
+    no_think: bool = false,
+    /// When true, empty `<think>\s*</think>` blocks are stripped from the
+    /// model's responses.  Implied when `no_think` is also true.
+    strip_think_tags: bool = false,
+};
+
 // ── Provider entry (for "providers" config section) ─────────────
 
 pub const ProviderEntry = struct {
     name: []const u8,
     api_key: ?[]const u8 = null,
     base_url: ?[]const u8 = null,
+    /// Models advertised by this provider, with per-model flags.
+    models: []const ModelEntry = &.{},
 };
 
 // ── Audio media config (tools.media.audio) ─────────────────────

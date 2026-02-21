@@ -60,7 +60,7 @@ pub const ChannelRuntime = struct {
         const holder = try allocator.create(ProviderHolder);
         errdefer allocator.destroy(holder);
 
-        holder.* = ProviderHolder.fromConfig(allocator, config.default_provider, config.defaultProviderKey());
+        holder.* = ProviderHolder.fromConfig(allocator, config.default_provider, config.defaultProviderKey(), .{ .qwen3_no_think = config.defaultModelNoThink(), .qwen3_strip_think_tags = config.defaultModelStripThinkTags() });
 
         const provider_i = holder.provider();
 

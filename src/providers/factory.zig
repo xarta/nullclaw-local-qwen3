@@ -10,6 +10,7 @@ const compatible = @import("compatible.zig");
 const claude_cli = @import("claude_cli.zig");
 const codex_cli = @import("codex_cli.zig");
 const openai_codex = @import("openai_codex.zig");
+const qwen3_local = @import("qwen3_local.zig");
 
 pub const ProviderKind = enum {
     anthropic_provider,
@@ -21,6 +22,7 @@ pub const ProviderKind = enum {
     claude_cli_provider,
     codex_cli_provider,
     openai_codex_provider,
+    qwen3_local_provider,
     unknown,
 };
 
@@ -92,6 +94,9 @@ pub fn classifyProvider(name: []const u8) ProviderKind {
 
     // anthropic-custom: prefix
     if (std.mem.startsWith(u8, name, "anthropic-custom:")) return .anthropic_provider;
+
+    // qwen3-local: prefix — local Qwen3 model via OpenAI-compatible endpoint
+    if (std.mem.startsWith(u8, name, "qwen3-local:")) return .qwen3_local_provider;
 
     return .unknown;
 }
@@ -226,6 +231,7 @@ pub const ProviderHolder = union(enum) {
     claude_cli: claude_cli.ClaudeCliProvider,
     codex_cli: codex_cli.CodexCliProvider,
     openai_codex: openai_codex.OpenAiCodexProvider,
+    qwen3_local: qwen3_local.Qwen3LocalProvider,
 
     /// Obtain the vtable-based Provider interface from whichever variant is active.
     pub fn provider(self: *ProviderHolder) Provider {
@@ -239,6 +245,7 @@ pub const ProviderHolder = union(enum) {
             .claude_cli => |*p| p.provider(),
             .codex_cli => |*p| p.provider(),
             .openai_codex => |*p| p.provider(),
+            .qwen3_local => |*p| p.provider(),
         };
     }
 
@@ -247,12 +254,23 @@ pub const ProviderHolder = union(enum) {
         self.provider().deinit();
     }
 
+    /// True when the active variant is a Qwen3 local provider.
+    pub fn isQwen3Local(self: *const ProviderHolder) bool {
+        return self.* == .qwen3_local;
+    }
+
     /// Create a ProviderHolder from a provider name string and optional API key.
     /// Uses `classifyProvider` to route to the correct concrete provider.
+    ///
+    /// `opts.qwen3_no_think` / `opts.qwen3_strip_think_tags` are passed to
+    /// `Qwen3LocalProvider`.  Call sites should supply the matching
+    /// `cfg.defaultModelNoThink()` / `cfg.defaultModelStripThinkTags()` values
+    /// so these come from the model entry in config.json.
     pub fn fromConfig(
         allocator: std.mem.Allocator,
         provider_name: []const u8,
         api_key: ?[]const u8,
+        opts: struct { qwen3_no_think: bool = false, qwen3_strip_think_tags: bool = false },
     ) ProviderHolder {
         const kind = classifyProvider(provider_name);
         return switch (kind) {
@@ -277,6 +295,17 @@ pub const ProviderHolder = union(enum) {
                     compatibleProviderUrl(provider_name) orelse "https://openrouter.ai/api/v1",
                 api_key,
                 .bearer,
+            ) },
+            .qwen3_local_provider => .{ .qwen3_local = qwen3_local.Qwen3LocalProvider.init(
+                allocator,
+                // Strip the "qwen3-local:" prefix to get the base URL.
+                if (std.mem.startsWith(u8, provider_name, "qwen3-local:"))
+                    provider_name["qwen3-local:".len..]
+                else
+                    "http://localhost:8000/v1",
+                api_key,
+                opts.qwen3_no_think,
+                opts.qwen3_strip_think_tags,
             ) },
             .claude_cli_provider => if (claude_cli.ClaudeCliProvider.init(allocator, null)) |p|
                 .{ .claude_cli = p }
@@ -410,39 +439,39 @@ test "ProviderHolder tagged union has all expected fields" {
 test "ProviderHolder.fromConfig routes to correct variant" {
     const alloc = std.testing.allocator;
     // anthropic
-    var h1 = ProviderHolder.fromConfig(alloc, "anthropic", "sk-test");
+    var h1 = ProviderHolder.fromConfig(alloc, "anthropic", "sk-test", .{});
     defer h1.deinit();
     try std.testing.expect(h1 == .anthropic);
     // openai
-    var h2 = ProviderHolder.fromConfig(alloc, "openai", "sk-test");
+    var h2 = ProviderHolder.fromConfig(alloc, "openai", "sk-test", .{});
     defer h2.deinit();
     try std.testing.expect(h2 == .openai);
     // gemini
-    var h3 = ProviderHolder.fromConfig(alloc, "gemini", "key");
+    var h3 = ProviderHolder.fromConfig(alloc, "gemini", "key", .{});
     defer h3.deinit();
     try std.testing.expect(h3 == .gemini);
     // ollama
-    var h4 = ProviderHolder.fromConfig(alloc, "ollama", null);
+    var h4 = ProviderHolder.fromConfig(alloc, "ollama", null, .{});
     defer h4.deinit();
     try std.testing.expect(h4 == .ollama);
     // openrouter
-    var h5 = ProviderHolder.fromConfig(alloc, "openrouter", "sk-or-test");
+    var h5 = ProviderHolder.fromConfig(alloc, "openrouter", "sk-or-test", .{});
     defer h5.deinit();
     try std.testing.expect(h5 == .openrouter);
     // compatible (groq)
-    var h6 = ProviderHolder.fromConfig(alloc, "groq", "gsk_test");
+    var h6 = ProviderHolder.fromConfig(alloc, "groq", "gsk_test", .{});
     defer h6.deinit();
     try std.testing.expect(h6 == .compatible);
     // openai-codex
-    var h7 = ProviderHolder.fromConfig(alloc, "openai-codex", null);
+    var h7 = ProviderHolder.fromConfig(alloc, "openai-codex", null, .{});
     defer h7.deinit();
     try std.testing.expect(h7 == .openai_codex);
     // unknown falls back to openrouter
-    var h8 = ProviderHolder.fromConfig(alloc, "nonexistent", "key");
+    var h8 = ProviderHolder.fromConfig(alloc, "nonexistent", "key", .{});
     defer h8.deinit();
     try std.testing.expect(h8 == .openrouter);
     // anthropic-custom prefix
-    var h9 = ProviderHolder.fromConfig(alloc, "anthropic-custom:https://my-api.example.com", "sk-test");
+    var h9 = ProviderHolder.fromConfig(alloc, "anthropic-custom:https://my-api.example.com", "sk-test", .{});
     defer h9.deinit();
     try std.testing.expect(h9 == .anthropic);
 }
