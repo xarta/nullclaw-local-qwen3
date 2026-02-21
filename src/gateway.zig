@@ -661,10 +661,13 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16) !void {
             if (db_path) |p| {
                 if (memory_mod.createMemory(allocator, cfg.memory.backend, p)) |mem| {
                     mem_opt = mem;
-                } else |_| {}
+                } else |err| {
+                    std.log.err("gateway: createMemory failed: {s}", .{@errorName(err)});
+                }
             }
 
             // Tools.
+            std.log.info("gateway: memory backend wired: {}", .{mem_opt != null});
             tools_slice = tools_mod.allTools(allocator, cfg.workspace_dir, .{
                 .http_enabled = cfg.http_request.enabled,
                 .browser_enabled = cfg.browser.enabled,

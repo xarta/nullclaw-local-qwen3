@@ -80,10 +80,13 @@ pub const ChannelRuntime = struct {
         if (db_path) |p| {
             if (memory_mod.createMemory(allocator, config.memory.backend, p)) |mem| {
                 mem_opt = mem;
-            } else |_| {}
+            } else |err| {
+                log.err("createMemory failed: {s}", .{@errorName(err)});
+            }
         }
 
         // Tools
+        log.info("channel_loop memory backend wired: {}", .{mem_opt != null});
         const tools = tools_mod.allTools(allocator, config.workspace_dir, .{
             .http_enabled = config.http_request.enabled,
             .browser_enabled = config.browser.enabled,
