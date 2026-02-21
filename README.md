@@ -11,8 +11,11 @@
 > - The [Configuration](#configuration) example below has been updated to show these additions
 > - `Dockerfile` updated to use Alpine runtime (fixes musl/glibc mismatch with upstream's distroless image) + `root.pem` slot for a private CA cert
 > - `docker-compose.yml` example included for running a named agent instance> - Memory tool wiring fix: `memory_store`/`memory_recall`/`memory_forget` tools now correctly receive the SQLite backend (upstream bug — tools were always initialised without a backend)>
-> Both the `qwen3-provider` and `memory` fixes are merged into `main`.
-> Upstream changes are tracked on the read-only `nullclaw-main-copy` branch.
+> - New `remind_me` tool: schedules one-shot Telegram reminders via the cron scheduler; takes `message` + `delay` (e.g. `"30m"`, `"2h"`); uses `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` env vars
+> - Cron scheduler fix: daemon now reloads `cron.json` on every tick, so jobs written by tools are picked up without a restart
+> - Cron persistence fix: `saveJobs` now correctly JSON-escapes string fields; previously raw double-quotes produced invalid JSON that silently discarded all tool-scheduled jobs
+>
+> All fixes are merged into `main`. Upstream changes are tracked on the read-only `nullclaw-main-copy` branch.
 
 ---
 
