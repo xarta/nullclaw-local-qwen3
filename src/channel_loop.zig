@@ -86,7 +86,6 @@ pub const ChannelRuntime = struct {
         }
 
         // Tools
-        log.info("channel_loop memory backend wired: {}", .{mem_opt != null});
         const tools = tools_mod.allTools(allocator, config.workspace_dir, .{
             .http_enabled = config.http_request.enabled,
             .browser_enabled = config.browser.enabled,
