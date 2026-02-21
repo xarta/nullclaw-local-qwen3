@@ -86,6 +86,61 @@ pub fn completeWithSystem(allocator: std.mem.Allocator, cfg: anytype, system_pro
     return try extractContent(allocator, response_body);
 }
 
+/// Like completeWithSystem but takes a fully-resolved URL directly.
+/// Used by subagent threads where the provider URL must be computed at
+/// runtime (e.g. qwen3-local: prefix extraction) rather than via the
+/// static providerUrl() map.
+pub fn completeAtUrl(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    api_key: ?[]const u8,
+    model: []const u8,
+    system_prompt: []const u8,
+    prompt: []const u8,
+    temperature: f64,
+    max_tokens: u32,
+) ![]const u8 {
+    const body_str = try buildRequestBodyWithSystem(allocator, model, system_prompt, prompt, temperature, max_tokens);
+    defer allocator.free(body_str);
+
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer allocator.free(aw.writer.buffer);
+
+    const result = resblk: {
+        if (api_key) |key| {
+            var auth_buf: [512]u8 = undefined;
+            const auth_val = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{key}) catch return error.NoApiKey;
+            break :resblk try client.fetch(.{
+                .location = .{ .url = url },
+                .method = .POST,
+                .payload = body_str,
+                .extra_headers = &.{
+                    .{ .name = "Authorization", .value = auth_val },
+                    .{ .name = "Content-Type", .value = "application/json" },
+                },
+                .response_writer = &aw.writer,
+            });
+        } else {
+            break :resblk try client.fetch(.{
+                .location = .{ .url = url },
+                .method = .POST,
+                .payload = body_str,
+                .extra_headers = &.{
+                    .{ .name = "Content-Type", .value = "application/json" },
+                },
+                .response_writer = &aw.writer,
+            });
+        }
+    };
+
+    if (result.status != .ok) return error.ProviderError;
+    const response_body = aw.writer.buffer[0..aw.writer.end];
+    return try extractContent(allocator, response_body);
+}
+
 /// Provider URL mapping for the legacy complete() function.
 pub fn providerUrl(provider_name: []const u8) []const u8 {
     const map = std.StaticStringMap([]const u8).initComptime(.{

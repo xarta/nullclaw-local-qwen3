@@ -43,6 +43,7 @@ pub const ProviderHolder = factory.ProviderHolder;
 // Re-exports from helpers.zig
 pub const complete = helpers.complete;
 pub const completeWithSystem = helpers.completeWithSystem;
+pub const completeAtUrl = helpers.completeAtUrl;
 pub const providerUrl = helpers.providerUrl;
 pub const buildRequestBody = helpers.buildRequestBody;
 pub const buildRequestBodyWithSystem = helpers.buildRequestBodyWithSystem;

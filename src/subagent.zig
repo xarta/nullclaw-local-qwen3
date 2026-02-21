@@ -12,6 +12,33 @@ const providers = @import("providers/root.zig");
 
 const log = std.log.scoped(.subagent);
 
+// ── Helpers ─────────────────────────────────────────────────────
+
+/// Resolve a provider name to a full chat-completions URL.
+///
+/// For `"qwen3-local:<base-url>"` providers the base URL is extracted
+/// and `/chat/completions` is appended if not already present.
+/// All other provider names fall through to the legacy static
+/// `providers.helpers.providerUrl()` map.
+///
+/// Caller owns the returned slice and must free it with `allocator`.
+pub fn resolveProviderUrl(allocator: Allocator, provider_name: []const u8) ![]const u8 {
+    const prefix = "qwen3-local:";
+    if (std.mem.startsWith(u8, provider_name, prefix)) {
+        const base = provider_name[prefix.len..];
+        const trimmed = if (base.len > 0 and base[base.len - 1] == '/')
+            base[0 .. base.len - 1]
+        else
+            base;
+        if (std.mem.endsWith(u8, trimmed, "/chat/completions")) {
+            return try allocator.dupe(u8, trimmed);
+        }
+        return try std.fmt.allocPrint(allocator, "{s}/chat/completions", .{trimmed});
+    }
+    return try allocator.dupe(u8, providers.helpers.providerUrl(provider_name));
+}
+
+
 // ── Task types ──────────────────────────────────────────────────
 
 pub const TaskStatus = enum {
@@ -44,6 +71,13 @@ const ThreadContext = struct {
     label: []const u8,
     origin_channel: []const u8,
     origin_chat_id: []const u8,
+    /// Override the global no_think setting for this subagent.
+    /// null = inherit from manager.no_think (global default)
+    /// true  = force thinking mode  (do NOT prepend /no_think)
+    /// false = force no-think mode  (DO prepend /no_think)
+    thinking_override: ?bool = null,
+    /// Max tokens for the subagent response. null = 4096 default.
+    max_tokens: ?u64 = null,
 };
 
 // ── SubagentManager ─────────────────────────────────────────────
@@ -63,6 +97,9 @@ pub const SubagentManager = struct {
     workspace_dir: []const u8,
     agents: []const config_mod.NamedAgentConfig,
     http_enabled: bool,
+    /// Global no_think setting derived from the default model config.
+    /// Individual spawns can override this via thinking_override.
+    no_think: bool,
 
     pub fn init(
         allocator: Allocator,
@@ -83,6 +120,7 @@ pub const SubagentManager = struct {
             .workspace_dir = cfg.workspace_dir,
             .agents = cfg.agents,
             .http_enabled = cfg.http_request.enabled,
+            .no_think = cfg.defaultModelNoThink(),
         };
     }
 
@@ -103,12 +141,23 @@ pub const SubagentManager = struct {
     }
 
     /// Spawn a background subagent. Returns task_id immediately.
+    ///
+    /// `opts.thinking_override`:
+    ///   null  → inherit the global `no_think` flag from the config
+    ///   true  → force thinking mode (skip /no_think prefix)
+    ///   false → force no-think mode (prepend /no_think prefix)
+    ///
+    /// `opts.max_tokens`: token budget for the subagent response (null = 4096).
     pub fn spawn(
         self: *SubagentManager,
         task: []const u8,
         label: []const u8,
         origin_channel: []const u8,
         origin_chat_id: []const u8,
+        opts: struct {
+            thinking_override: ?bool = null,
+            max_tokens: ?u64 = null,
+        },
     ) !u64 {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -137,6 +186,8 @@ pub const SubagentManager = struct {
             .label = try self.allocator.dupe(u8, label),
             .origin_channel = try self.allocator.dupe(u8, origin_channel),
             .origin_chat_id = try self.allocator.dupe(u8, origin_chat_id),
+            .thinking_override = opts.thinking_override,
+            .max_tokens = opts.max_tokens,
         };
 
         state.thread = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, subagentThreadFn, .{ctx});
@@ -236,28 +287,47 @@ fn subagentThreadFn(ctx: *ThreadContext) void {
         ctx.manager.allocator.destroy(ctx);
     }
 
-    // Use the legacy complete path — simple, works with any provider,
-    // no need to replicate the full ProviderHolder pattern.
-    // Build a config-like struct for providers.completeWithSystem().
     const system_prompt = "You are a background subagent. Complete the assigned task concisely and accurately. You have no access to interactive tools — focus on reasoning and analysis.";
 
     var cfg_arena = std.heap.ArenaAllocator.init(ctx.manager.allocator);
     defer cfg_arena.deinit();
+    const arena = cfg_arena.allocator();
 
-    // Build a config-like struct that providers.completeWithSystem() accepts
-    const cfg = .{
-        .api_key = ctx.manager.api_key,
-        .default_provider = ctx.manager.default_provider,
-        .default_model = ctx.manager.default_model,
-        .temperature = @as(f64, 0.7),
-        .max_tokens = @as(?u64, null),
+    // ── Determine effective thinking mode ──────────────────────────────────
+    // thinking_override=true  → force thinking  (never prepend /no_think)
+    // thinking_override=false → force no-think  (always prepend /no_think)
+    // thinking_override=null  → inherit global no_think flag from config
+    const want_no_think: bool = if (ctx.thinking_override) |t| !t else ctx.manager.no_think;
+
+    // Prepend /no_think pragma to the user prompt when needed.
+    // Qwen3 only honours the pragma in the user turn, not in system prompt.
+    const effective_task: []const u8 = if (want_no_think)
+        std.fmt.allocPrint(arena, "/no_think\n{s}", .{ctx.task}) catch ctx.task
+    else
+        ctx.task;
+
+    // ── Resolve provider URL ───────────────────────────────────────────────
+    // Legacy helpers.providerUrl() uses a static compile-time map that does
+    // not know about runtime "qwen3-local:<url>" provider strings.  Extract
+    // the base URL directly when that prefix is present.
+    const provider_name = ctx.manager.default_provider;
+    const full_url: []const u8 = resolveProviderUrl(arena, provider_name) catch {
+        ctx.manager.completeTask(ctx.task_id, null, "OOM resolving provider URL");
+        return;
     };
 
-    const result = providers.completeWithSystem(
-        cfg_arena.allocator(),
-        &cfg,
+    const model = ctx.manager.default_model orelse "anthropic/claude-sonnet-4-5-20250929";
+    const max_tok: u32 = if (ctx.max_tokens) |mt| @intCast(@min(mt, std.math.maxInt(u32))) else 4096;
+
+    const result = providers.completeAtUrl(
+        arena,
+        full_url,
+        ctx.manager.api_key,
+        model,
         system_prompt,
-        ctx.task,
+        effective_task,
+        0.7,
+        max_tok,
     ) catch |err| {
         ctx.manager.completeTask(ctx.task_id, null, @errorName(err));
         return;
@@ -413,4 +483,75 @@ test "SubagentManager completeTask routes via bus" {
     if (bus.consumeInbound()) |msg| {
         msg.deinit(std.testing.allocator);
     }
+}
+test "SubagentManager stores no_think from config" {
+    // no_think comes from cfg.defaultModelNoThink() — which returns false
+    // for a config with no providers/models set.
+    const cfg = config_mod.Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = std.testing.allocator,
+    };
+    var mgr = SubagentManager.init(std.testing.allocator, &cfg, null, .{});
+    defer mgr.deinit();
+    // Default config has no Qwen3 model with no_think → false
+    try std.testing.expectEqual(false, mgr.no_think);
+}
+
+test "ThreadContext thinking_override defaults to null" {
+    const ctx = ThreadContext{
+        .manager = undefined,
+        .task_id = 1,
+        .task = "test",
+        .label = "test",
+        .origin_channel = "system",
+        .origin_chat_id = "agent",
+    };
+    try std.testing.expect(ctx.thinking_override == null);
+    try std.testing.expect(ctx.max_tokens == null);
+}
+
+test "ThreadContext can set thinking_override true" {
+    const ctx = ThreadContext{
+        .manager = undefined,
+        .task_id = 1,
+        .task = "analyse this",
+        .label = "thinker",
+        .origin_channel = "system",
+        .origin_chat_id = "agent",
+        .thinking_override = true,
+        .max_tokens = 2048,
+    };
+    try std.testing.expect(ctx.thinking_override.? == true);
+    try std.testing.expectEqual(@as(?u64, 2048), ctx.max_tokens);
+}
+
+test "resolveProviderUrl handles qwen3-local prefix" {
+    const url = try resolveProviderUrl(std.testing.allocator, "qwen3-local:https://litellm.example.com/v1");
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://litellm.example.com/v1/chat/completions", url);
+}
+
+test "resolveProviderUrl trailing slash stripped" {
+    const url = try resolveProviderUrl(std.testing.allocator, "qwen3-local:https://litellm.example.com/v1/");
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://litellm.example.com/v1/chat/completions", url);
+}
+
+test "resolveProviderUrl already has chat/completions" {
+    const url = try resolveProviderUrl(std.testing.allocator, "qwen3-local:https://litellm.example.com/v1/chat/completions");
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://litellm.example.com/v1/chat/completions", url);
+}
+
+test "resolveProviderUrl openai falls back to static map" {
+    const url = try resolveProviderUrl(std.testing.allocator, "openai");
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://api.openai.com/v1/chat/completions", url);
+}
+
+test "resolveProviderUrl falls back to openrouter for unknown" {
+    const url = try resolveProviderUrl(std.testing.allocator, "some-unknown-provider");
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://openrouter.ai/api/v1/chat/completions", url);
 }

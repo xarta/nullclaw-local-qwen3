@@ -80,6 +80,7 @@ pub const web_search = @import("web_search.zig");
 pub const web_fetch = @import("web_fetch.zig");
 pub const file_append = @import("file_append.zig");
 pub const spawn = @import("spawn.zig");
+pub const reflect = @import("reflect.zig");
 pub const tool_help = @import("tool_help.zig");
 pub const i2c = @import("i2c.zig");
 pub const spi = @import("spi.zig");
@@ -350,6 +351,11 @@ pub fn allTools(
     const sp = try allocator.create(spawn.SpawnTool);
     sp.* = .{ .manager = opts.subagent_manager };
     try list.append(allocator, sp.tool());
+
+    // Reflect tool (background thinking subagent for conversation analysis)
+    const rft = try allocator.create(reflect.ReflectTool);
+    rft.* = .{ .manager = opts.subagent_manager };
+    try list.append(allocator, rft.tool());
 
     if (opts.http_enabled) {
         const ht = try allocator.create(http_request.HttpRequestTool);
@@ -623,15 +629,16 @@ test "all tools includes extras when enabled" {
         std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[10].ptr))));
         std.testing.allocator.destroy(@as(*remind_me.RemindMeTool, @ptrCast(@alignCast(tools[11].ptr))));
         std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[12].ptr))));
-        std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[13].ptr))));
-        std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[14].ptr))));
-        std.testing.allocator.destroy(@as(*tool_help.ToolHelpTool, @ptrCast(@alignCast(tools[15].ptr))));
+        std.testing.allocator.destroy(@as(*reflect.ReflectTool, @ptrCast(@alignCast(tools[13].ptr))));
+        std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[14].ptr))));
+        std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[15].ptr))));
+        std.testing.allocator.destroy(@as(*tool_help.ToolHelpTool, @ptrCast(@alignCast(tools[16].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
     // + memory_store + memory_recall + memory_forget + delegate + schedule
-    // + remind_me + spawn + http_request + browser + tool_help = 16
-    try std.testing.expectEqual(@as(usize, 16), tools.len);
+    // + remind_me + spawn + reflect + http_request + browser + tool_help = 17
+    try std.testing.expectEqual(@as(usize, 17), tools.len);
 }
 
 test "all tools excludes extras when disabled" {
@@ -653,13 +660,14 @@ test "all tools excludes extras when disabled" {
         std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[10].ptr))));
         std.testing.allocator.destroy(@as(*remind_me.RemindMeTool, @ptrCast(@alignCast(tools[11].ptr))));
         std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[12].ptr))));
-        std.testing.allocator.destroy(@as(*tool_help.ToolHelpTool, @ptrCast(@alignCast(tools[13].ptr))));
+        std.testing.allocator.destroy(@as(*reflect.ReflectTool, @ptrCast(@alignCast(tools[13].ptr))));
+        std.testing.allocator.destroy(@as(*tool_help.ToolHelpTool, @ptrCast(@alignCast(tools[14].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
     // + memory_store + memory_recall + memory_forget + delegate + schedule + remind_me + spawn
-    // + tool_help = 14
-    try std.testing.expectEqual(@as(usize, 14), tools.len);
+    // + reflect + tool_help = 15
+    try std.testing.expectEqual(@as(usize, 15), tools.len);
 }
 
 test {
