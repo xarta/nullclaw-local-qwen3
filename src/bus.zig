@@ -42,7 +42,7 @@ pub const OutboundMessage = struct {
     pub fn deinit(self: *const OutboundMessage, allocator: Allocator) void {
         for (self.media) |m| allocator.free(m);
         if (self.media.len > 0) allocator.free(self.media);
-        // channel is a string literal or long-lived config pointer — not owned, don't free
+        allocator.free(self.channel);
         allocator.free(self.chat_id);
         allocator.free(self.content);
     }
@@ -139,13 +139,14 @@ pub fn makeOutbound(
     chat_id: []const u8,
     content: []const u8,
 ) Allocator.Error!OutboundMessage {
-    // channel is not duped — must be a literal or long-lived config pointer
+    const ch = try allocator.dupe(u8, channel);
+    errdefer allocator.free(ch);
     const cid = try allocator.dupe(u8, chat_id);
     errdefer allocator.free(cid);
     const ct = try allocator.dupe(u8, content);
 
     return .{
-        .channel = channel,
+        .channel = ch,
         .chat_id = cid,
         .content = ct,
     };
@@ -159,7 +160,8 @@ fn makeOutboundWithMedia(
     content: []const u8,
     media_src: []const []const u8,
 ) Allocator.Error!OutboundMessage {
-    // channel is not duped — must be a literal or long-lived config pointer
+    const ch = try allocator.dupe(u8, channel);
+    errdefer allocator.free(ch);
     const cid = try allocator.dupe(u8, chat_id);
     errdefer allocator.free(cid);
     const ct = try allocator.dupe(u8, content);
@@ -179,7 +181,7 @@ fn makeOutboundWithMedia(
     } else &[_][]const u8{};
 
     return .{
-        .channel = channel,
+        .channel = ch,
         .chat_id = cid,
         .content = ct,
         .media = media,

@@ -279,6 +279,7 @@ pub const SubagentManager = struct {
 
         // Route result via bus (outside lock)
         if (self.bus) |b| {
+            log.info("subagent: publishing result to outbound bus (channel={s} chat={s})", .{ origin_channel, origin_chat_id });
             const content = if (owned_result) |r|
                 std.fmt.allocPrint(self.allocator, "[Subagent '{s}' completed]\n{s}", .{ label, r }) catch return
             else if (owned_err) |e|
@@ -300,6 +301,8 @@ pub const SubagentManager = struct {
             b.publishOutbound(msg) catch |err| {
                 log.err("subagent: failed to publish result to bus: {}", .{err});
             };
+        } else {
+            log.warn("subagent '{s}': no bus configured, result discarded", .{label});
         }
     }
 };
@@ -314,6 +317,8 @@ fn subagentThreadFn(ctx: *ThreadContext) void {
         ctx.manager.allocator.free(ctx.origin_chat_id);
         ctx.manager.allocator.destroy(ctx);
     }
+
+    log.info("subagent '{s}' (task {d}): thread started, routing to {s}/{s}", .{ ctx.label, ctx.task_id, ctx.origin_channel, ctx.origin_chat_id });
 
     const system_prompt = "You are a background subagent. Complete the assigned task concisely and accurately. You have no access to interactive tools — focus on reasoning and analysis.";
 
@@ -352,10 +357,12 @@ fn subagentThreadFn(ctx: *ThreadContext) void {
         0.7,
         max_tok,
     ) catch |err| {
+        log.err("subagent '{s}' (task {d}): completeAtUrl failed: {s}", .{ ctx.label, ctx.task_id, @errorName(err) });
         ctx.manager.completeTask(ctx.task_id, null, @errorName(err), ctx.origin_channel, ctx.origin_chat_id);
         return;
     };
 
+    log.info("subagent '{s}' (task {d}): completed, publishing to {s}/{s}", .{ ctx.label, ctx.task_id, ctx.origin_channel, ctx.origin_chat_id });
     ctx.manager.completeTask(ctx.task_id, result, null, ctx.origin_channel, ctx.origin_chat_id);
 }
 
