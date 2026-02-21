@@ -38,6 +38,30 @@ pub fn resolveProviderUrl(allocator: Allocator, provider_name: []const u8) ![]co
     return try allocator.dupe(u8, providers.helpers.providerUrl(provider_name));
 }
 
+/// Determine whether `/no_think` should be prepended to a task prompt.
+///
+/// - `thinking_override = true`  → caller explicitly wants thinking  → return false (do NOT prepend)
+/// - `thinking_override = false` → caller explicitly wants no-think  → return true  (DO prepend)
+/// - `thinking_override = null`  → inherit `global_no_think` from config
+pub fn shouldPrependNoThink(thinking_override: ?bool, global_no_think: bool) bool {
+    if (thinking_override) |t| return !t;
+    return global_no_think;
+}
+
+/// Build the effective task prompt, prepending `/no_think\n` when required.
+/// Returns an owned slice; caller must free with `allocator`.
+pub fn buildEffectiveTask(
+    allocator: Allocator,
+    task: []const u8,
+    thinking_override: ?bool,
+    global_no_think: bool,
+) ![]const u8 {
+    if (shouldPrependNoThink(thinking_override, global_no_think)) {
+        return std.fmt.allocPrint(allocator, "/no_think\n{s}", .{task});
+    }
+    return allocator.dupe(u8, task);
+}
+
 
 // ── Task types ──────────────────────────────────────────────────
 
@@ -293,23 +317,18 @@ fn subagentThreadFn(ctx: *ThreadContext) void {
     defer cfg_arena.deinit();
     const arena = cfg_arena.allocator();
 
-    // ── Determine effective thinking mode ──────────────────────────────────
-    // thinking_override=true  → force thinking  (never prepend /no_think)
-    // thinking_override=false → force no-think  (always prepend /no_think)
-    // thinking_override=null  → inherit global no_think flag from config
-    const want_no_think: bool = if (ctx.thinking_override) |t| !t else ctx.manager.no_think;
-
-    // Prepend /no_think pragma to the user prompt when needed.
-    // Qwen3 only honours the pragma in the user turn, not in system prompt.
-    const effective_task: []const u8 = if (want_no_think)
-        std.fmt.allocPrint(arena, "/no_think\n{s}", .{ctx.task}) catch ctx.task
-    else
-        ctx.task;
+    // ── Determine effective task prompt ───────────────────────────────────
+    const effective_task: []const u8 = buildEffectiveTask(
+        arena,
+        ctx.task,
+        ctx.thinking_override,
+        ctx.manager.no_think,
+    ) catch {
+        ctx.manager.completeTask(ctx.task_id, null, "OOM building effective task");
+        return;
+    };
 
     // ── Resolve provider URL ───────────────────────────────────────────────
-    // Legacy helpers.providerUrl() uses a static compile-time map that does
-    // not know about runtime "qwen3-local:<url>" provider strings.  Extract
-    // the base URL directly when that prefix is present.
     const provider_name = ctx.manager.default_provider;
     const full_url: []const u8 = resolveProviderUrl(arena, provider_name) catch {
         ctx.manager.completeTask(ctx.task_id, null, "OOM resolving provider URL");
@@ -555,3 +574,63 @@ test "resolveProviderUrl falls back to openrouter for unknown" {
     defer std.testing.allocator.free(url);
     try std.testing.expectEqualStrings("https://openrouter.ai/api/v1/chat/completions", url);
 }
+
+// ── shouldPrependNoThink tests ──────────────────────────────────
+
+test "shouldPrependNoThink: override=true → false (thinking on)" {
+    // Caller explicitly wants thinking — never prepend /no_think
+    try std.testing.expect(!shouldPrependNoThink(true, true));
+    try std.testing.expect(!shouldPrependNoThink(true, false));
+}
+
+test "shouldPrependNoThink: override=false → true (no-think forced)" {
+    // Caller explicitly wants no-think — always prepend /no_think
+    try std.testing.expect(shouldPrependNoThink(false, true));
+    try std.testing.expect(shouldPrependNoThink(false, false));
+}
+
+test "shouldPrependNoThink: override=null inherits global" {
+    // No override — follow global setting
+    try std.testing.expect(shouldPrependNoThink(null, true));
+    try std.testing.expect(!shouldPrependNoThink(null, false));
+}
+
+// ── buildEffectiveTask tests ────────────────────────────────────
+
+test "buildEffectiveTask: thinking override=true → no prefix" {
+    // Even when global no_think=true, override=true disables it
+    const task = try buildEffectiveTask(std.testing.allocator, "hello", true, true);
+    defer std.testing.allocator.free(task);
+    try std.testing.expectEqualStrings("hello", task);
+}
+
+test "buildEffectiveTask: thinking override=false → /no_think prefix" {
+    const task = try buildEffectiveTask(std.testing.allocator, "hello", false, false);
+    defer std.testing.allocator.free(task);
+    try std.testing.expectEqualStrings("/no_think\nhello", task);
+}
+
+test "buildEffectiveTask: override=null global=true → /no_think prefix" {
+    // Standard testy config: no_think=true, no override → prefix applied
+    const task = try buildEffectiveTask(std.testing.allocator, "what time is it?", null, true);
+    defer std.testing.allocator.free(task);
+    try std.testing.expectEqualStrings("/no_think\nwhat time is it?", task);
+}
+
+test "buildEffectiveTask: override=null global=false → no prefix" {
+    // Model without no_think, no override → no prefix
+    const task = try buildEffectiveTask(std.testing.allocator, "what time is it?", null, false);
+    defer std.testing.allocator.free(task);
+    try std.testing.expectEqualStrings("what time is it?", task);
+}
+
+test "buildEffectiveTask: reflect pattern — thinking forced on despite global no_think" {
+    // Mirrors what reflect tool does: thinking_override=true, global no_think=true
+    const original = "Did I miss anything the user was implying?";
+    const task = try buildEffectiveTask(std.testing.allocator, original, true, true);
+    defer std.testing.allocator.free(task);
+    // Must NOT have /no_think prefix
+    try std.testing.expect(!std.mem.startsWith(u8, task, "/no_think"));
+    try std.testing.expectEqualStrings(original, task);
+}
+
