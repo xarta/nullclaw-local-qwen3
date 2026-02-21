@@ -224,6 +224,17 @@ pub const CronScheduler = struct {
         self.jobs.deinit(self.allocator);
     }
 
+    /// Clear all jobs, freeing their allocated memory without deinitialising the list.
+    pub fn clearJobs(self: *CronScheduler) void {
+        for (self.jobs.items) |job| {
+            self.allocator.free(job.id);
+            self.allocator.free(job.expression);
+            self.allocator.free(job.command);
+            if (job.last_output) |o| self.allocator.free(o);
+        }
+        self.jobs.clearRetainingCapacity();
+    }
+
     /// Add a recurring cron job.
     pub fn addJob(self: *CronScheduler, expression: []const u8, command: []const u8) !*CronJob {
         if (self.jobs.items.len >= self.max_tasks) return error.MaxTasksReached;
@@ -417,8 +428,13 @@ pub const CronScheduler = struct {
         const poll_ns: u64 = poll_secs * std.time.ns_per_s;
 
         while (true) {
+            // Reload from disk so jobs added/removed by tools are picked up.
+            self.clearJobs();
+            loadJobs(self) catch {};
             const now = std.time.timestamp();
             self.tick(now, out_bus);
+            // Persist state changes (last_run_secs, one-shot removal, etc.)
+            saveJobs(self) catch {};
             std.Thread.sleep(poll_ns);
         }
     }
@@ -610,9 +626,9 @@ pub fn saveJobs(scheduler: *const CronScheduler) !void {
     try w.writeAll("[\n");
     for (scheduler.jobs.items, 0..) |job, i| {
         try w.writeAll("  {");
-        try w.print("\"id\":\"{s}\",", .{job.id});
-        try w.print("\"expression\":\"{s}\",", .{job.expression});
-        try w.print("\"command\":\"{s}\",", .{job.command});
+        try w.print("\"id\":{f},", .{std.json.fmt(job.id, .{})});
+        try w.print("\"expression\":{f},", .{std.json.fmt(job.expression, .{})});
+        try w.print("\"command\":{f},", .{std.json.fmt(job.command, .{})});
         try w.print("\"next_run_secs\":{d},", .{job.next_run_secs});
         if (job.last_run_secs) |lrs| {
             try w.print("\"last_run_secs\":{d},", .{lrs});
@@ -620,7 +636,7 @@ pub fn saveJobs(scheduler: *const CronScheduler) !void {
             try w.writeAll("\"last_run_secs\":null,");
         }
         if (job.last_status) |ls| {
-            try w.print("\"last_status\":\"{s}\",", .{ls});
+            try w.print("\"last_status\":{f},", .{std.json.fmt(ls, .{})});
         } else {
             try w.writeAll("\"last_status\":null,");
         }
