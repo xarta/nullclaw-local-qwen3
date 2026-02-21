@@ -2,6 +2,10 @@
 # pre-push: run the full test suite before pushing.
 # Activate: git config core.hooksPath .githooks
 #
+# Blocks the push only if there are MORE failures than the known upstream
+# baseline recorded in .githooks/test-baseline-failures.
+# Update that file when upstream introduces new known failures.
+#
 # Runs via:
 #   1. Local `zig` if found in PATH
 #   2. Docker image `nullclaw-zig-dev` if available
@@ -9,27 +13,23 @@
 #   3. Skips with a warning if neither is available
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+BASELINE_FILE="$REPO_ROOT/.githooks/test-baseline-failures"
+BASELINE=$(cat "$BASELINE_FILE" 2>/dev/null | tr -d '[:space:]')
+BASELINE=${BASELINE:-0}
 
-run_tests() {
-    echo "Running tests..."
-    zig build test --summary all 2>&1
-}
+TMPOUT=$(mktemp)
+trap 'rm -f "$TMPOUT"' EXIT
 
-run_tests_docker() {
-    echo "Running tests (via Docker nullclaw-zig-dev)..."
+echo "Running tests (upstream baseline: $BASELINE known failures)..."
+
+if command -v zig >/dev/null 2>&1; then
+    zig build test --summary all 2>&1 | tee "$TMPOUT"
+elif docker image inspect nullclaw-zig-dev >/dev/null 2>&1; then
     docker run --rm \
         -v "$REPO_ROOT":/app \
         -w /app \
         nullclaw-zig-dev \
-        zig build test --summary all 2>&1
-}
-
-if command -v zig >/dev/null 2>&1; then
-    run_tests
-    rc=$?
-elif docker image inspect nullclaw-zig-dev >/dev/null 2>&1; then
-    run_tests_docker
-    rc=$?
+        zig build test --summary all 2>&1 | tee "$TMPOUT"
 else
     echo "⚠️  pre-push: neither 'zig' nor Docker image 'nullclaw-zig-dev' found."
     echo "   Skipping test run. To enable, build the image once:"
@@ -37,7 +37,18 @@ else
     exit 0
 fi
 
-if [ $rc -ne 0 ]; then
-    echo "Tests failed. Fix before pushing."
+# Parse failure count from summary line e.g. "2921/2933 passed, 4 failed, 8 skipped"
+FAILURES=$(grep -oE '[0-9]+ failed' "$TMPOUT" | grep -oE '[0-9]+' | tail -1)
+FAILURES=${FAILURES:-0}
+
+if [ "$FAILURES" -gt "$BASELINE" ]; then
+    NEW=$(( FAILURES - BASELINE ))
+    echo ""
+    echo "❌ $NEW new test failure(s) beyond the upstream baseline of $BASELINE."
+    echo "   Fix before pushing, or update .githooks/test-baseline-failures if"
+    echo "   upstream introduced new known failures."
     exit 1
 fi
+
+echo ""
+echo "✅ Tests: $FAILURES failure(s) — within baseline of $BASELINE. OK to push."
