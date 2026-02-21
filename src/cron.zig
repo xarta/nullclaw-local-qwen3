@@ -224,6 +224,17 @@ pub const CronScheduler = struct {
         self.jobs.deinit(self.allocator);
     }
 
+    /// Clear all jobs, freeing their allocated memory without deinitialising the list.
+    pub fn clearJobs(self: *CronScheduler) void {
+        for (self.jobs.items) |job| {
+            self.allocator.free(job.id);
+            self.allocator.free(job.expression);
+            self.allocator.free(job.command);
+            if (job.last_output) |o| self.allocator.free(o);
+        }
+        self.jobs.clearRetainingCapacity();
+    }
+
     /// Add a recurring cron job.
     pub fn addJob(self: *CronScheduler, expression: []const u8, command: []const u8) !*CronJob {
         if (self.jobs.items.len >= self.max_tasks) return error.MaxTasksReached;
@@ -417,8 +428,13 @@ pub const CronScheduler = struct {
         const poll_ns: u64 = poll_secs * std.time.ns_per_s;
 
         while (true) {
+            // Reload from disk so jobs added/removed by tools are picked up.
+            self.clearJobs();
+            loadJobs(self) catch {};
             const now = std.time.timestamp();
             self.tick(now, out_bus);
+            // Persist state changes (last_run_secs, one-shot removal, etc.)
+            saveJobs(self) catch {};
             std.Thread.sleep(poll_ns);
         }
     }
