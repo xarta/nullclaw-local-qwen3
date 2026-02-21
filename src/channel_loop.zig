@@ -115,7 +115,9 @@ pub const ChannelRuntime = struct {
         const obs = noop_obs.observer();
 
         // Session manager
-        const session_mgr = session_mod.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs);
+        var session_mgr = session_mod.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs);
+        // Wire the subagent manager so agents can auto-trigger background reflect.
+        session_mgr.subagent_manager = sub_mgr;
 
         // Self — heap-allocated so pointers remain stable
         const self = try allocator.create(ChannelRuntime);

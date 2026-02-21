@@ -146,11 +146,25 @@ When uncertain, classify as higher risk.
 
 ## 6) Agent Workflow (Required)
 
-1. **Read before write** — inspect existing module, vtable wiring, and adjacent tests before editing.
-2. **Define scope boundary** — one concern per change; avoid mixed feature+refactor+infra patches.
-3. **Implement minimal patch** — apply KISS/YAGNI/DRY rule-of-three explicitly.
-4. **Validate** — `zig build test --summary all` must show 0 failures and 0 leaks.
-5. **Document impact** — update comments/docs for behavior changes, risk, and side effects.
+> ### ⚠️ ALWAYS CREATE A NEW BRANCH BEFORE STARTING ANY NEW WORK ⚠️
+>
+> **Never commit new feature work directly to `main`.** Before touching a single
+> file, create a dedicated branch:
+>
+> ```bash
+> git checkout -b <feature-name>   # e.g. git checkout -b auto-reflect
+> ```
+>
+> Work on the branch, commit there, then PR/merge to `main` only when the
+> feature is validated. Committing directly to `main` makes rollback, review,
+> and bisection much harder. There are no exceptions to this rule.
+
+1. **Branch first** — `git checkout -b <feature-name>` before any edits (see above).
+2. **Read before write** — inspect existing module, vtable wiring, and adjacent tests before editing.
+3. **Define scope boundary** — one concern per change; avoid mixed feature+refactor+infra patches.
+4. **Implement minimal patch** — apply KISS/YAGNI/DRY rule-of-three explicitly.
+5. **Validate** — `zig build test --summary all` must show 0 failures and 0 leaks.
+6. **Document impact** — update comments/docs for behavior changes, risk, and side effects.
 
 ### 6.1 Code Naming Contract (Required)
 
@@ -253,6 +267,7 @@ To bypass a hook in an emergency: `git commit --no-verify` / `git push --no-veri
 
 ## 10) Anti-Patterns (Do Not)
 
+- **Do not commit directly to `main`** — always branch first (see Section 6).
 - Do not add C dependencies or large Zig packages without strong justification (binary size impact).
 - Do not return vtable interfaces pointing to temporaries — dangling pointer.
 - Do not use `std.io.getStdOut()` — it does not exist in Zig 0.15.

@@ -82,9 +82,10 @@ pub const ReflectTool = struct {
                 allocator,
                 "[Reflection task]\nQuestion: {s}\n\nConversation context:\n{s}\n\n" ++
                     "Analyse the exchange above with the question in mind. " ++
-                    "Be concise. If you find nothing worth flagging, say so briefly. " ++
-                    "If you identify something useful, state it clearly so the main " ++
-                    "agent can act on it in the next turn.",
+                    "Respond AS the assistant in first person — use natural phrasing such as " ++
+                    "'I should correct myself — ...', 'I realise I missed...', or 'I remember now — ...'. " ++
+                    "Be concise. " ++
+                    "If nothing is wrong or worth flagging, output only the word LGTM.",
                 .{ trimmed_q, ctx },
             ) catch return ToolResult.fail("OOM building reflection task")
         else
@@ -92,7 +93,8 @@ pub const ReflectTool = struct {
                 allocator,
                 "[Reflection task]\nQuestion: {s}\n\n" ++
                     "Analyse this question carefully. " ++
-                    "Be concise. State any useful conclusion clearly.",
+                    "Respond in first person, concisely. " ++
+                    "If nothing is wrong or worth flagging, output only the word LGTM.",
                 .{trimmed_q},
             ) catch return ToolResult.fail("OOM building reflection task");
         defer allocator.free(task);
@@ -101,9 +103,12 @@ pub const ReflectTool = struct {
         const chat_id = manager.current_chat_id;
 
         // Always spawn with thinking_override = true (force thinking mode).
+        // suppress_lgtm = true: if the subagent finds nothing to correct it
+        // outputs "LGTM" and we silently discard it rather than sending noise.
         const task_id = manager.spawn(task, label, channel, chat_id, .{
             .thinking_override = true,
             .max_tokens = max_tokens,
+            .suppress_lgtm = true,
         }) catch |err| {
             return switch (err) {
                 error.TooManyConcurrentSubagents => ToolResult.fail(

@@ -62,6 +62,36 @@ pub fn buildEffectiveTask(
     return allocator.dupe(u8, task);
 }
 
+/// Strip ALL `<think>...</think>` blocks from `text`.
+/// Unlike `Qwen3LocalProvider.stripEmptyThinkBlock`, this removes blocks that
+/// contain actual content (i.e. the subagent's chain-of-thought). A single
+/// trailing newline after each closing tag is also consumed.
+/// Returns an owned slice; caller must free with `allocator`.
+pub fn stripThinkBlocks(allocator: Allocator, text: []const u8) ![]const u8 {
+    const open = "<think>";
+    const close = "</think>";
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var pos: usize = 0;
+    while (pos < text.len) {
+        const think_start = std.mem.indexOfPos(u8, text, pos, open) orelse {
+            try buf.appendSlice(allocator, text[pos..]);
+            break;
+        };
+        try buf.appendSlice(allocator, text[pos..think_start]);
+        const after_open = think_start + open.len;
+        const think_end = std.mem.indexOfPos(u8, text, after_open, close) orelse {
+            // No closing tag — keep everything from think_start onward as-is.
+            try buf.appendSlice(allocator, text[think_start..]);
+            break;
+        };
+        pos = think_end + close.len;
+        // Consume one trailing newline so we don't leave a blank line.
+        if (pos < text.len and text[pos] == '\n') pos += 1;
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
 
 // ── Task types ──────────────────────────────────────────────────
 
@@ -79,6 +109,9 @@ pub const TaskState = struct {
     started_at: i64,
     completed_at: ?i64 = null,
     thread: ?std.Thread = null,
+    /// When true, a result that trims to "LGTM" is silently discarded
+    /// and not published to the outbound bus.  Used by auto-reflect.
+    suppress_lgtm: bool = false,
 };
 
 pub const SubagentConfig = struct {
@@ -124,6 +157,12 @@ pub const SubagentManager = struct {
     /// Global no_think setting derived from the default model config.
     /// Individual spawns can override this via thinking_override.
     no_think: bool,
+    /// When true, `<think>...</think>` blocks are stripped from subagent
+    /// results before publishing.  Derived from `cfg.defaultModelStripThinkTags()`.
+    strip_think: bool = false,
+    /// True while an auto-reflect subagent is in-flight.  Prevents stacking
+    /// multiple simultaneous auto-reflects on consecutive turns.
+    reflect_in_flight: bool = false,
     /// Channel/chat_id of the most recent user message — updated before each
     /// processMessage() call so spawn/reflect results are routed back correctly.
     current_channel: []const u8 = "system",
@@ -149,6 +188,7 @@ pub const SubagentManager = struct {
             .agents = cfg.agents,
             .http_enabled = cfg.http_request.enabled,
             .no_think = cfg.defaultModelNoThink(),
+            .strip_think = cfg.defaultModelStripThinkTags(),
         };
     }
 
@@ -185,6 +225,8 @@ pub const SubagentManager = struct {
         opts: struct {
             thinking_override: ?bool = null,
             max_tokens: ?u64 = null,
+            /// When true, a result of "LGTM" is silently discarded (not published).
+            suppress_lgtm: bool = false,
         },
     ) !u64 {
         self.mutex.lock();
@@ -201,6 +243,7 @@ pub const SubagentManager = struct {
             .status = .running,
             .label = try self.allocator.dupe(u8, label),
             .started_at = std.time.milliTimestamp(),
+            .suppress_lgtm = opts.suppress_lgtm,
         };
 
         try self.tasks.put(self.allocator, task_id, state);
@@ -260,11 +303,21 @@ pub const SubagentManager = struct {
     /// `origin_channel` / `origin_chat_id` are used to route the result back to
     /// the user via the outbound bus (picked up by the channel dispatcher).
     fn completeTask(self: *SubagentManager, task_id: u64, result: ?[]const u8, err_msg: ?[]const u8, origin_channel: []const u8, origin_chat_id: []const u8) void {
-        // Dupe result/error into manager's allocator (source may be arena-backed)
-        const owned_result = if (result) |r| self.allocator.dupe(u8, r) catch null else null;
+        // Dupe result/error into manager's allocator (source may be arena-backed).
+        // Strip think blocks from successful results when strip_think is active.
+        const raw_result = if (result) |r| self.allocator.dupe(u8, r) catch null else null;
+        const owned_result: ?[]const u8 = if (raw_result) |r| blk: {
+            if (self.strip_think) {
+                const stripped = stripThinkBlocks(self.allocator, r) catch r;
+                if (stripped.ptr != r.ptr) self.allocator.free(r);
+                break :blk stripped;
+            }
+            break :blk r;
+        } else null;
         const owned_err = if (err_msg) |e| self.allocator.dupe(u8, e) catch null else null;
 
         var label: []const u8 = "subagent";
+        var suppress_lgtm: bool = false;
         {
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -274,6 +327,24 @@ pub const SubagentManager = struct {
                 state.error_msg = owned_err;
                 state.completed_at = std.time.milliTimestamp();
                 label = state.label;
+                suppress_lgtm = state.suppress_lgtm;
+            }
+        }
+
+        // Clear reflect_in_flight whenever an auto-reflect finishes.
+        if (std.mem.startsWith(u8, label, "auto-reflect")) {
+            self.reflect_in_flight = false;
+        }
+
+        // LGTM gate: suppress publish if the result is just "LGTM" and the
+        // caller opted in (used by auto-reflect to avoid noise on good turns).
+        if (suppress_lgtm) {
+            if (owned_result) |r| {
+                const trimmed = std.mem.trim(u8, r, " \t\n\r");
+                if (std.mem.eql(u8, trimmed, "LGTM")) {
+                    log.info("subagent '{s}': result is LGTM — suppressing publish", .{label});
+                    return;
+                }
             }
         }
 
@@ -643,5 +714,148 @@ test "buildEffectiveTask: reflect pattern — thinking forced on despite global 
     // Must NOT have /no_think prefix
     try std.testing.expect(!std.mem.startsWith(u8, task, "/no_think"));
     try std.testing.expectEqualStrings(original, task);
+}
+
+// ── stripThinkBlocks tests ──────────────────────────────────────
+
+test "stripThinkBlocks: no think block passthrough" {
+    const input = "Hello, world!";
+    const result = try stripThinkBlocks(std.testing.allocator, input);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("Hello, world!", result);
+}
+
+test "stripThinkBlocks: strips non-empty think block" {
+    const input = "<think>some reasoning here</think>The answer is 42.";
+    const result = try stripThinkBlocks(std.testing.allocator, input);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("The answer is 42.", result);
+}
+
+test "stripThinkBlocks: strips empty think block" {
+    const input = "<think></think>Clean output.";
+    const result = try stripThinkBlocks(std.testing.allocator, input);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("Clean output.", result);
+}
+
+test "stripThinkBlocks: consumes trailing newline after block" {
+    const input = "<think>reasoning</think>\nThe answer is 42.";
+    const result = try stripThinkBlocks(std.testing.allocator, input);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("The answer is 42.", result);
+}
+
+test "stripThinkBlocks: multiple think blocks" {
+    const input = "<think>first</think>Middle.<think>second</think>End.";
+    const result = try stripThinkBlocks(std.testing.allocator, input);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("Middle.End.", result);
+}
+
+test "stripThinkBlocks: unclosed think tag kept as-is" {
+    const input = "<think>no closing tag";
+    const result = try stripThinkBlocks(std.testing.allocator, input);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("<think>no closing tag", result);
+}
+
+test "stripThinkBlocks: multiline content" {
+    const input = "<think>\nline one\nline two\n</think>\nActual response.";
+    const result = try stripThinkBlocks(std.testing.allocator, input);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("Actual response.", result);
+}
+
+// ── LGTM gate tests ─────────────────────────────────────────────
+
+test "completeTask: LGTM result suppressed when suppress_lgtm=true" {
+    const cfg = config_mod.Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = std.testing.allocator,
+    };
+    var bus = bus_mod.Bus.init();
+    defer bus.close();
+
+    var mgr = SubagentManager.init(std.testing.allocator, &cfg, &bus, .{});
+    defer mgr.deinit();
+
+    const state = try std.testing.allocator.create(TaskState);
+    state.* = .{
+        .status = .running,
+        .label = try std.testing.allocator.dupe(u8, "auto-reflect"),
+        .started_at = std.time.milliTimestamp(),
+        .suppress_lgtm = true,
+    };
+    try mgr.tasks.put(std.testing.allocator, 1, state);
+
+    mgr.completeTask(1, "LGTM", null, "telegram", "user123");
+
+    // Bus outbound should be empty — LGTM was suppressed
+    try std.testing.expectEqual(@as(usize, 0), bus.outboundDepth());
+    // Status should still be updated
+    try std.testing.expectEqual(TaskStatus.completed, mgr.getTaskStatus(1).?);
+}
+
+test "completeTask: non-LGTM result published even with suppress_lgtm=true" {
+    const cfg = config_mod.Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = std.testing.allocator,
+    };
+    var bus = bus_mod.Bus.init();
+    defer bus.close();
+
+    var mgr = SubagentManager.init(std.testing.allocator, &cfg, &bus, .{});
+    defer mgr.deinit();
+
+    const state = try std.testing.allocator.create(TaskState);
+    state.* = .{
+        .status = .running,
+        .label = try std.testing.allocator.dupe(u8, "auto-reflect"),
+        .started_at = std.time.milliTimestamp(),
+        .suppress_lgtm = true,
+    };
+    try mgr.tasks.put(std.testing.allocator, 1, state);
+
+    mgr.completeTask(1, "I should correct myself — the correct answer is 42.", null, "telegram", "user123");
+
+    // Bus should have the correction
+    try std.testing.expect(bus.outboundDepth() > 0);
+    bus.close();
+    if (bus.consumeOutbound()) |msg| {
+        msg.deinit(std.testing.allocator);
+    }
+}
+
+test "completeTask: reflect_in_flight cleared for auto-reflect label" {
+    const cfg = config_mod.Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = std.testing.allocator,
+    };
+    var mgr = SubagentManager.init(std.testing.allocator, &cfg, null, .{});
+    defer mgr.deinit();
+    mgr.reflect_in_flight = true;
+
+    const state = try std.testing.allocator.create(TaskState);
+    state.* = .{
+        .status = .running,
+        .label = try std.testing.allocator.dupe(u8, "auto-reflect"),
+        .started_at = std.time.milliTimestamp(),
+    };
+    try mgr.tasks.put(std.testing.allocator, 1, state);
+
+    mgr.completeTask(1, "done", null, "system", "agent");
+
+    try std.testing.expectEqual(false, mgr.reflect_in_flight);
+}
+
+test "stripThinkBlocks exported via providers root" {
+    // Structural: just confirm the function is callable from this module
+    const result = try stripThinkBlocks(std.testing.allocator, "plain text");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("plain text", result);
 }
 

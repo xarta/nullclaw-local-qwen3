@@ -20,6 +20,7 @@ const observability = @import("observability.zig");
 const Observer = observability.Observer;
 const tools_mod = @import("tools/root.zig");
 const Tool = tools_mod.Tool;
+const subagent_mod = @import("subagent.zig");
 const SecurityPolicy = @import("security/policy.zig").SecurityPolicy;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -56,6 +57,9 @@ pub const SessionManager = struct {
 
     mutex: std.Thread.Mutex,
     sessions: std.StringHashMapUnmanaged(*Session),
+    /// When set, each new agent session receives a reference to this manager
+    /// so it can auto-trigger background reflect after pure-text turns.
+    subagent_manager: ?*subagent_mod.SubagentManager = null,
 
     pub fn init(
         allocator: Allocator,
@@ -112,6 +116,7 @@ pub const SessionManager = struct {
             self.observer,
         );
         agent.policy = self.policy;
+        agent.subagent_manager = self.subagent_manager;
 
         session.* = .{
             .agent = agent,

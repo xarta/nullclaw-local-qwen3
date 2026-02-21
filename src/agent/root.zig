@@ -20,6 +20,7 @@ const observability = @import("../observability.zig");
 const Observer = observability.Observer;
 const ObserverEvent = observability.ObserverEvent;
 const SecurityPolicy = @import("../security/policy.zig").SecurityPolicy;
+const subagent_mod = @import("../subagent.zig");
 
 pub const dispatcher = @import("dispatcher.zig");
 pub const compaction = @import("compaction.zig");
@@ -66,6 +67,10 @@ pub const Agent = struct {
 
     /// Optional security policy for autonomy checks and rate limiting.
     policy: ?*const SecurityPolicy = null,
+
+    /// Optional SubagentManager reference for auto-triggering reflect after
+    /// pure-text turns.  Injected externally; not owned by Agent.
+    subagent_manager: ?*subagent_mod.SubagentManager = null,
 
     /// Optional streaming callback. When set, turn() uses streamChat() for streaming providers.
     stream_callback: ?providers.StreamCallback = null,
@@ -562,6 +567,37 @@ pub const Agent = struct {
                 // Free provider response fields (content, tool_calls, model)
                 // All borrows have been duped into final_text and history at this point.
                 self.freeResponseFields(&response);
+
+                // ── Auto-reflect ─────────────────────────────────────────────
+                // After a pure-text turn (no tool calls), silently spawn a
+                // background thinking subagent to check for missed errors or
+                // implicit user intent.  The result is published to the chat
+                // only when it finds something worth surfacing (non-LGTM).
+                if (self.subagent_manager) |mgr| {
+                    if (!mgr.reflect_in_flight and final_text.len > 20) {
+                        const reflect_task = std.fmt.allocPrint(
+                            self.allocator,
+                            "[Reflection task]\n" ++
+                                "Question: Review the assistant's last response. " ++
+                                "Were there any factual errors, missed implications, " ++
+                                "or things the user was hinting at that weren't addressed?\n\n" ++
+                                "Conversation context:\n[User]: {s}\n[Assistant]: {s}\n\n" ++
+                                "Respond AS the assistant in first person — for example: " ++
+                                "'I should correct myself \u{2014} ...', 'I realise I missed...', " ++
+                                "'I remember now \u{2014} ...'. " ++
+                                "If nothing is wrong or worth flagging, output only the word LGTM.",
+                            .{ user_message, final_text },
+                        ) catch null;
+                        if (reflect_task) |rt| {
+                            defer self.allocator.free(rt);
+                            _ = mgr.spawn(rt, "auto-reflect", mgr.current_channel, mgr.current_chat_id, .{
+                                .thinking_override = true,
+                                .suppress_lgtm = true,
+                            }) catch {};
+                            mgr.reflect_in_flight = true;
+                        }
+                    }
+                }
 
                 return final_text;
             }
