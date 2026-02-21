@@ -10,9 +10,8 @@
 > - Two new per-model config flags: `no_think` and `strip_think_tags`
 > - The [Configuration](#configuration) example below has been updated to show these additions
 > - `Dockerfile` updated to use Alpine runtime (fixes musl/glibc mismatch with upstream's distroless image) + `root.pem` slot for a private CA cert
-> - `docker-compose.yml` example included for running a named agent instance
->
-> Branches: `qwen3-provider` (Qwen3 provider), `memory` (memory bug fix in progress).
+> - `docker-compose.yml` example included for running a named agent instance> - Memory tool wiring fix: `memory_store`/`memory_recall`/`memory_forget` tools now correctly receive the SQLite backend (upstream bug — tools were always initialised without a backend)>
+> Both the `qwen3-provider` and `memory` fixes are merged into `main`.
 > Upstream changes are tracked on the read-only `nullclaw-main-copy` branch.
 
 ---
