@@ -26,6 +26,39 @@ pub const RemindMeTool = struct {
         \\{"type":"object","properties":{"message":{"type":"string","minLength":1,"description":"Reminder text to send via Telegram"},"delay":{"type":"string","description":"How long until the reminder fires, e.g. '1m', '30m', '2h', '1d'"}},"required":["message","delay"]}
     ;
 
+    pub const tool_help =
+        \\## remind_me
+        \\
+        \\Schedule a one-shot Telegram reminder. A cron job is created that fires once
+        \\after the given delay, then is automatically cleaned up.
+        \\
+        \\### Parameters
+        \\- `message` (string, required): Text to send. Any UTF-8. Emoji OK. No length limit enforced
+        \\  beyond Telegram's own API limits (~4096 chars).
+        \\- `delay` (string, required): How long until the reminder fires.
+        \\  Format: a positive integer followed by a unit letter — no spaces.
+        \\  Valid units: s (seconds), m (minutes), h (hours), d (days).
+        \\  Examples: "30s", "5m", "2h", "1d".
+        \\  "1 hour" or "1hr" will NOT work — it must be "1h".
+        \\
+        \\### Returns (success)
+        \\  "Reminder set — job <id> fires in <delay>. To cancel: schedule cancel <id>"
+        \\  Example: "Reminder set — job a3f9b2 fires in 2h. To cancel: schedule cancel a3f9b2"
+        \\
+        \\### Returns (failure)
+        \\  An error string describing what went wrong (e.g. invalid delay format,
+        \\  scheduler unavailable, Telegram env vars not set at job run-time).
+        \\
+        \\### Gotchas
+        \\- The delay format is strict: "30m" works, "30 minutes" does not.
+        \\- Telegram env vars (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) must be set in the
+        \\  container environment at job *run-time* — they are not validated at schedule time.
+        \\- To cancel a pending reminder, use the `schedule` tool: `schedule cancel <job_id>`.
+        \\- To list pending reminders, use: `schedule list`.
+        \\- Jobs persist across container restarts (stored on disk).
+        \\- The message is percent-encoded at schedule time, so all characters are safe.
+    ;
+
     const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *RemindMeTool) Tool {

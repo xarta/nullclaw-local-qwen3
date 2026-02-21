@@ -12,6 +12,7 @@
 > - `Dockerfile` updated to use Alpine runtime (fixes musl/glibc mismatch with upstream's distroless image) + `root.pem` slot for a private CA cert
 > - `docker-compose.yml` example included for running a named agent instance> - Memory tool wiring fix: `memory_store`/`memory_recall`/`memory_forget` tools now correctly receive the SQLite backend (upstream bug — tools were always initialised without a backend)>
 > - New `remind_me` tool: schedules one-shot Telegram reminders via the cron scheduler; takes `message` + `delay` (e.g. `"30m"`, `"2h"`); uses `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` env vars
+> - New `tool_help` tool: man-page-style reference for complex tools; call `tool_help(tool_name="remind_me")` when uncertain about parameters; tools opt in by declaring `pub const tool_help` in their struct — simple tools return a short "use your schema" message
 > - Cron scheduler fix: daemon now reloads `cron.json` on every tick, so jobs written by tools are picked up without a restart
 > - Cron persistence fix: `saveJobs` now correctly JSON-escapes string fields; previously raw double-quotes produced invalid JSON that silently discarded all tool-scheduled jobs
 >
