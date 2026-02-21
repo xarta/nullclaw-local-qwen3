@@ -103,41 +103,23 @@ pub fn completeAtUrl(
     const body_str = try buildRequestBodyWithSystem(allocator, model, system_prompt, prompt, temperature, max_tokens);
     defer allocator.free(body_str);
 
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
+    // Use curl subprocess (same as all other provider calls) to avoid
+    // std.http.Client TLS issues in the container environment.
+    var headers_buf: [2][]const u8 = undefined;
+    var n_headers: usize = 0;
+    headers_buf[n_headers] = "Content-Type: application/json";
+    n_headers += 1;
 
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer allocator.free(aw.writer.buffer);
+    var auth_header_buf: [512]u8 = undefined;
+    if (api_key) |key| {
+        const auth_val = std.fmt.bufPrint(&auth_header_buf, "Authorization: Bearer {s}", .{key}) catch return error.NoApiKey;
+        headers_buf[n_headers] = auth_val;
+        n_headers += 1;
+    }
 
-    const result = resblk: {
-        if (api_key) |key| {
-            var auth_buf: [512]u8 = undefined;
-            const auth_val = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{key}) catch return error.NoApiKey;
-            break :resblk try client.fetch(.{
-                .location = .{ .url = url },
-                .method = .POST,
-                .payload = body_str,
-                .extra_headers = &.{
-                    .{ .name = "Authorization", .value = auth_val },
-                    .{ .name = "Content-Type", .value = "application/json" },
-                },
-                .response_writer = &aw.writer,
-            });
-        } else {
-            break :resblk try client.fetch(.{
-                .location = .{ .url = url },
-                .method = .POST,
-                .payload = body_str,
-                .extra_headers = &.{
-                    .{ .name = "Content-Type", .value = "application/json" },
-                },
-                .response_writer = &aw.writer,
-            });
-        }
-    };
+    const response_body = try http_util.curlPost(allocator, url, body_str, headers_buf[0..n_headers]);
+    defer allocator.free(response_body);
 
-    if (result.status != .ok) return error.ProviderError;
-    const response_body = aw.writer.buffer[0..aw.writer.end];
     return try extractContent(allocator, response_body);
 }
 
