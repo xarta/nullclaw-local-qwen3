@@ -15,3 +15,6 @@ reference/
 
 result
 .direnv/
+
+# Local notes — never committed
+DAVE-ONLY/
