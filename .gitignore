@@ -16,5 +16,9 @@ reference/
 result
 .direnv/
 
+# Core dumps
+core
+core.*
+
 # Local notes — never committed
 DAVE-ONLY/
