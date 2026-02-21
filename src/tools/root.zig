@@ -80,6 +80,7 @@ pub const web_search = @import("web_search.zig");
 pub const web_fetch = @import("web_fetch.zig");
 pub const file_append = @import("file_append.zig");
 pub const spawn = @import("spawn.zig");
+pub const tool_help = @import("tool_help.zig");
 pub const i2c = @import("i2c.zig");
 pub const spi = @import("spi.zig");
 pub const path_security = @import("path_security.zig");
@@ -130,6 +131,10 @@ pub const Tool = struct {
         name: *const fn (ptr: *anyopaque) []const u8,
         description: *const fn (ptr: *anyopaque) []const u8,
         parameters_json: *const fn (ptr: *anyopaque) []const u8,
+        /// Return extended man-page-style help for this tool.
+        /// Tools that opt in declare `pub const tool_help: []const u8` in their struct.
+        /// Tools that do not opt in return a short "no extended help" message.
+        help: *const fn (ptr: *anyopaque) []const u8,
     };
 
     pub fn execute(self: Tool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
@@ -148,6 +153,12 @@ pub const Tool = struct {
         return self.vtable.parameters_json(self.ptr);
     }
 
+    /// Return extended help text for this tool (man-page style).
+    /// Returns a short fallback message for tools that have not opted in.
+    pub fn help(self: Tool) []const u8 {
+        return self.vtable.help(self.ptr);
+    }
+
     pub fn spec(self: Tool) ToolSpec {
         return .{
             .name = self.name(),
@@ -164,6 +175,9 @@ pub const Tool = struct {
 ///   - `pub const tool_description: []const u8`
 ///   - `pub const tool_params: []const u8`
 ///   - `fn execute(self: *T, allocator: Allocator, args: JsonObjectMap) anyerror!ToolResult`
+///
+/// Optionally, T may declare:
+///   - `pub const tool_help: []const u8`  — extended man-page help returned by tool_help tool
 pub fn ToolVTable(comptime T: type) Tool.VTable {
     return .{
         .execute = &struct {
@@ -185,6 +199,12 @@ pub fn ToolVTable(comptime T: type) Tool.VTable {
         .parameters_json = &struct {
             fn f(_: *anyopaque) []const u8 {
                 return T.tool_params;
+            }
+        }.f,
+        .help = &struct {
+            fn f(_: *anyopaque) []const u8 {
+                if (@hasDecl(T, "tool_help")) return T.tool_help;
+                return "No extended help for this tool — the schema and description you already have are sufficient.";
             }
         }.f,
     };
@@ -382,7 +402,17 @@ pub fn allTools(
         }
     }
 
-    return list.toOwnedSlice(allocator);
+    // tool_help — appended last so its tools slice covers the full set.
+    // Allocated with an empty slice; the pointer is fixed up after toOwnedSlice
+    // so the tool can see all other tools at runtime.
+    const th = try allocator.create(tool_help.ToolHelpTool);
+    th.* = .{ .tools = &.{} };
+    try list.append(allocator, th.tool());
+
+    const result = try list.toOwnedSlice(allocator);
+    // Point tool_help at the final slice (includes itself at the last index).
+    th.tools = result;
+    return result;
 }
 
 /// Create restricted tool set for subagents.
@@ -595,12 +625,13 @@ test "all tools includes extras when enabled" {
         std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[12].ptr))));
         std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[13].ptr))));
         std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[14].ptr))));
+        std.testing.allocator.destroy(@as(*tool_help.ToolHelpTool, @ptrCast(@alignCast(tools[15].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
     // + memory_store + memory_recall + memory_forget + delegate + schedule
-    // + remind_me + spawn + http_request + browser = 15
-    try std.testing.expectEqual(@as(usize, 15), tools.len);
+    // + remind_me + spawn + http_request + browser + tool_help = 16
+    try std.testing.expectEqual(@as(usize, 16), tools.len);
 }
 
 test "all tools excludes extras when disabled" {
@@ -622,11 +653,13 @@ test "all tools excludes extras when disabled" {
         std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[10].ptr))));
         std.testing.allocator.destroy(@as(*remind_me.RemindMeTool, @ptrCast(@alignCast(tools[11].ptr))));
         std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[12].ptr))));
+        std.testing.allocator.destroy(@as(*tool_help.ToolHelpTool, @ptrCast(@alignCast(tools[13].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
-    // + memory_store + memory_recall + memory_forget + delegate + schedule + remind_me + spawn = 13
-    try std.testing.expectEqual(@as(usize, 13), tools.len);
+    // + memory_store + memory_recall + memory_forget + delegate + schedule + remind_me + spawn
+    // + tool_help = 14
+    try std.testing.expectEqual(@as(usize, 14), tools.len);
 }
 
 test {

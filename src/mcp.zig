@@ -300,6 +300,12 @@ pub const McpToolWrapper = struct {
         .name = &nameImpl,
         .description = &descImpl,
         .parameters_json = &paramsImpl,
+        // MCP tools have no locally-authored help text.
+        .help = &struct {
+            fn f(_: *anyopaque) []const u8 {
+                return "No extended help for this MCP tool — the schema and description you already have are sufficient.";
+            }
+        }.f,
     };
 
     pub fn tool(self: *McpToolWrapper) tools_mod.Tool {
