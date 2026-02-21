@@ -31,8 +31,6 @@ const MAX_REFLECT_TOKENS: u64 = 8192;
 
 pub const ReflectTool = struct {
     manager: ?*SubagentManager = null,
-    default_channel: ?[]const u8 = null,
-    default_chat_id: ?[]const u8 = null,
 
     pub const tool_name = "reflect";
     pub const tool_description =
@@ -99,8 +97,8 @@ pub const ReflectTool = struct {
             ) catch return ToolResult.fail("OOM building reflection task");
         defer allocator.free(task);
 
-        const channel = self.default_channel orelse "system";
-        const chat_id = self.default_chat_id orelse "agent";
+        const channel = manager.current_channel;
+        const chat_id = manager.current_chat_id;
 
         // Always spawn with thinking_override = true (force thinking mode).
         const task_id = manager.spawn(task, label, channel, chat_id, .{

@@ -124,6 +124,10 @@ pub const SubagentManager = struct {
     /// Global no_think setting derived from the default model config.
     /// Individual spawns can override this via thinking_override.
     no_think: bool,
+    /// Channel/chat_id of the most recent user message — updated before each
+    /// processMessage() call so spawn/reflect results are routed back correctly.
+    current_channel: []const u8 = "system",
+    current_chat_id: []const u8 = "agent",
 
     pub fn init(
         allocator: Allocator,
@@ -253,7 +257,9 @@ pub const SubagentManager = struct {
     }
 
     /// Mark a task as completed or failed. Thread-safe.
-    fn completeTask(self: *SubagentManager, task_id: u64, result: ?[]const u8, err_msg: ?[]const u8) void {
+    /// `origin_channel` / `origin_chat_id` are used to route the result back to
+    /// the user via the outbound bus (picked up by the channel dispatcher).
+    fn completeTask(self: *SubagentManager, task_id: u64, result: ?[]const u8, err_msg: ?[]const u8, origin_channel: []const u8, origin_chat_id: []const u8) void {
         // Dupe result/error into manager's allocator (source may be arena-backed)
         const owned_result = if (result) |r| self.allocator.dupe(u8, r) catch null else null;
         const owned_err = if (err_msg) |e| self.allocator.dupe(u8, e) catch null else null;
@@ -280,20 +286,18 @@ pub const SubagentManager = struct {
             else
                 std.fmt.allocPrint(self.allocator, "[Subagent '{s}' finished]", .{label}) catch return;
 
-            const msg = bus_mod.makeInbound(
+            const msg = bus_mod.makeOutbound(
                 self.allocator,
-                "system",
-                "subagent",
-                "agent",
+                origin_channel,
+                origin_chat_id,
                 content,
-                "system:subagent",
             ) catch {
                 self.allocator.free(content);
                 return;
             };
             self.allocator.free(content);
 
-            b.publishInbound(msg) catch |err| {
+            b.publishOutbound(msg) catch |err| {
                 log.err("subagent: failed to publish result to bus: {}", .{err});
             };
         }
@@ -324,14 +328,14 @@ fn subagentThreadFn(ctx: *ThreadContext) void {
         ctx.thinking_override,
         ctx.manager.no_think,
     ) catch {
-        ctx.manager.completeTask(ctx.task_id, null, "OOM building effective task");
+        ctx.manager.completeTask(ctx.task_id, null, "OOM building effective task", ctx.origin_channel, ctx.origin_chat_id);
         return;
     };
 
     // ── Resolve provider URL ───────────────────────────────────────────────
     const provider_name = ctx.manager.default_provider;
     const full_url: []const u8 = resolveProviderUrl(arena, provider_name) catch {
-        ctx.manager.completeTask(ctx.task_id, null, "OOM resolving provider URL");
+        ctx.manager.completeTask(ctx.task_id, null, "OOM resolving provider URL", ctx.origin_channel, ctx.origin_chat_id);
         return;
     };
 
@@ -348,11 +352,11 @@ fn subagentThreadFn(ctx: *ThreadContext) void {
         0.7,
         max_tok,
     ) catch |err| {
-        ctx.manager.completeTask(ctx.task_id, null, @errorName(err));
+        ctx.manager.completeTask(ctx.task_id, null, @errorName(err), ctx.origin_channel, ctx.origin_chat_id);
         return;
     };
 
-    ctx.manager.completeTask(ctx.task_id, result, null);
+    ctx.manager.completeTask(ctx.task_id, result, null, ctx.origin_channel, ctx.origin_chat_id);
 }
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -443,7 +447,7 @@ test "SubagentManager completeTask updates state" {
     };
     try mgr.tasks.put(std.testing.allocator, 1, state);
 
-    mgr.completeTask(1, "done!", null);
+    mgr.completeTask(1, "done!", null, "system", "agent");
 
     try std.testing.expectEqual(TaskStatus.completed, mgr.getTaskStatus(1).?);
     try std.testing.expectEqualStrings("done!", mgr.getTaskResult(1).?);
@@ -466,7 +470,7 @@ test "SubagentManager completeTask with error" {
     };
     try mgr.tasks.put(std.testing.allocator, 1, state);
 
-    mgr.completeTask(1, null, "timeout");
+    mgr.completeTask(1, null, "timeout", "system", "agent");
 
     try std.testing.expectEqual(TaskStatus.failed, mgr.getTaskStatus(1).?);
     try std.testing.expect(mgr.getTaskResult(1) == null);
@@ -492,14 +496,14 @@ test "SubagentManager completeTask routes via bus" {
     };
     try mgr.tasks.put(std.testing.allocator, 1, state);
 
-    mgr.completeTask(1, "result text", null);
+    mgr.completeTask(1, "result text", null, "telegram", "user123");
 
-    // Check bus received the message — verify depth increased
-    try std.testing.expect(bus.inboundDepth() > 0);
+    // Check bus received the message — verify outbound depth increased
+    try std.testing.expect(bus.outboundDepth() > 0);
 
     // Drain the bus to avoid memory leak
     bus.close();
-    if (bus.consumeInbound()) |msg| {
+    if (bus.consumeOutbound()) |msg| {
         msg.deinit(std.testing.allocator);
     }
 }

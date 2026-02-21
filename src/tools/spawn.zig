@@ -9,8 +9,6 @@ const SubagentManager = @import("../subagent.zig").SubagentManager;
 /// Returns a task ID immediately. Results are delivered as system messages.
 pub const SpawnTool = struct {
     manager: ?*SubagentManager = null,
-    default_channel: ?[]const u8 = null,
-    default_chat_id: ?[]const u8 = null,
 
     pub const tool_name = "spawn";
     pub const tool_description = "Spawn a background subagent to work on a task asynchronously. Returns a task ID immediately. Results are delivered as system messages when complete. Use `thinking: true` to enable chain-of-thought reasoning for complex tasks, even when the main agent has no_think mode active.";
@@ -41,8 +39,8 @@ pub const SpawnTool = struct {
         const manager = self.manager orelse
             return ToolResult.fail("Spawn tool not connected to SubagentManager");
 
-        const channel = self.default_channel orelse "system";
-        const chat_id = self.default_chat_id orelse "agent";
+        const channel = manager.current_channel;
+        const chat_id = manager.current_chat_id;
 
         const task_id = manager.spawn(trimmed_task, label, channel, chat_id, .{
             .thinking_override = root.getBool(args, "thinking"),

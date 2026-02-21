@@ -438,7 +438,7 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     // Channel runtime for supervised polling (provider, tools, sessions)
     var channel_rt: ?*channel_loop.ChannelRuntime = null;
     if (hasSupervisedChannels(config)) {
-        channel_rt = channel_loop.ChannelRuntime.init(allocator, config) catch |err| blk: {
+        channel_rt = channel_loop.ChannelRuntime.init(allocator, config, &event_bus) catch |err| blk: {
             stdout.print("Warning: channel runtime init failed: {}\n", .{err}) catch {};
             state.markError("channels", @errorName(err));
             break :blk null;
