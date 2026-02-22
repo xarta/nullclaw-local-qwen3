@@ -157,7 +157,8 @@ pub const ChannelRuntime = struct {
 /// ───────────────────
 /// • SessionManager (session.zig) is thread-safe: a per-session mutex
 ///   serialises turns within the same chat; different chats run in parallel.
-/// • `subagent_manager.current_channel / current_chat_id` are set per-job
+/// • origin_channel / origin_chat_id are stamped directly onto the per-session
+///   Agent via processMessageWithContext — no shared-manager race.
 ///   without a lock.  If two threads run concurrently they will race, but the
 ///   worst outcome is one reflect result being routed to the wrong chat.  This
 ///   is a known, acceptable trade-off until a per-session SubagentManager is
@@ -185,14 +186,14 @@ const MsgJob = struct {
         var typing = telegram.TypingIndicator.init(ctx.tg);
         typing.start(ctx.sender);
 
-        // Update subagent routing (best-effort under concurrent load).
-        ctx.subagent_manager.current_channel = "telegram";
-        ctx.subagent_manager.current_chat_id = ctx.sender;
-
         var key_buf: [128]u8 = undefined;
         const session_key = std.fmt.bufPrint(&key_buf, "telegram:{s}", .{ctx.sender}) catch ctx.sender;
 
-        const reply = ctx.session_mgr.processMessage(session_key, ctx.content) catch |err| {
+        // Use processMessageWithContext to stamp origin_channel/origin_chat_id
+        // directly onto the per-session Agent — avoids the race where a second
+        // concurrent MsgJob overwrites SubagentManager.current_channel/chat_id
+        // before the first agent's auto-reflect fires.
+        const reply = ctx.session_mgr.processMessageWithContext(session_key, ctx.content, "telegram", ctx.sender) catch |err| {
             typing.stop();
             log.err("message thread: agent error: {}", .{err});
             const err_text: []const u8 = switch (err) {
@@ -331,16 +332,13 @@ pub fn runTelegramLoop(
                 // Inline fallback: same logic as before threading was added.
                 log.warn("spawnMsgJob failed; processing inline for sender={s}", .{msg.sender});
 
-                runtime.subagent_manager.current_channel = "telegram";
-                runtime.subagent_manager.current_chat_id = msg.sender;
-
                 var key_buf: [128]u8 = undefined;
                 const session_key = std.fmt.bufPrint(&key_buf, "telegram:{s}", .{msg.sender}) catch msg.sender;
 
                 var typing_fb = telegram.TypingIndicator.init(tg_ptr);
                 typing_fb.start(msg.sender);
 
-                const reply = runtime.session_mgr.processMessage(session_key, msg.content) catch |err| {
+                const reply = runtime.session_mgr.processMessageWithContext(session_key, msg.content, "telegram", msg.sender) catch |err| {
                     typing_fb.stop();
                     log.err("Agent error (inline): {}", .{err});
                     const err_msg: []const u8 = switch (err) {

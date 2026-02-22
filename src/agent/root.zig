@@ -72,6 +72,13 @@ pub const Agent = struct {
     /// pure-text turns.  Injected externally; not owned by Agent.
     subagent_manager: ?*subagent_mod.SubagentManager = null,
 
+    /// Channel and chat ID for the current message, used by auto-reflect to
+    /// route corrections back to the right conversation.  Set per-message by
+    /// the caller (e.g. MsgJob) before calling turn(). Owned by the caller —
+    /// Agent does NOT free these.
+    origin_channel: []const u8 = "system",
+    origin_chat_id: []const u8 = "agent",
+
     /// Optional streaming callback. When set, turn() uses streamChat() for streaming providers.
     stream_callback: ?providers.StreamCallback = null,
     /// Context pointer passed to stream_callback.
@@ -578,19 +585,26 @@ pub const Agent = struct {
                         const reflect_task = std.fmt.allocPrint(
                             self.allocator,
                             "[Reflection task]\n" ++
-                                "Question: Review the assistant's last response. " ++
-                                "Were there any factual errors, missed implications, " ++
-                                "or things the user was hinting at that weren't addressed?\n\n" ++
+                                "Review the assistant's last response for ALL of the following issues:\n\n" ++
+                                "1. ANNOUNCE-WITHOUT-EXECUTE (most important): Did the assistant " ++
+                                "explicitly say it would perform an action or call a tool — e.g., " ++
+                                "'I will now check...', 'Let me look up...', 'Let\u{2019}s proceed with that', " ++
+                                "'I will use the shell command...' — but then STOP without actually " ++
+                                "calling any tool? If so, this MUST be flagged.\n" ++
+                                "2. Factual errors or incorrect information in the response.\n" ++
+                                "3. Missed implications or unhinted-at user needs.\n\n" ++
                                 "Conversation context:\n[User]: {s}\n[Assistant]: {s}\n\n" ++
-                                "Respond AS the assistant in first person — for example: " ++
-                                "'I should correct myself \u{2014} ...', 'I realise I missed...', " ++
-                                "'I remember now \u{2014} ...'. " ++
+                                "Respond AS the assistant in first person. Examples:\n" ++
+                                "'I should correct myself \u{2014} I said I would check X but never " ++
+                                "called any tool. I will do it now.'\n" ++
+                                "'I realise I missed...'\n" ++
+                                "'I remember now \u{2014} ...'\n" ++
                                 "If nothing is wrong or worth flagging, output only the word LGTM.",
                             .{ user_message, final_text },
                         ) catch null;
                         if (reflect_task) |rt| {
                             defer self.allocator.free(rt);
-                            _ = mgr.spawn(rt, "auto-reflect", mgr.current_channel, mgr.current_chat_id, .{
+                            _ = mgr.spawn(rt, "auto-reflect", self.origin_channel, self.origin_chat_id, .{
                                 .thinking_override = true,
                                 .suppress_lgtm = true,
                             }) catch {};
