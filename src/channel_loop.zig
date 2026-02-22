@@ -146,6 +146,112 @@ pub const ChannelRuntime = struct {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
+// MsgJob — per-message thread context for concurrent session processing
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Context for a single Telegram message processed in its own thread.
+/// Allocated with std.heap.c_allocator (always thread-safe) and freed by the
+/// thread when complete.
+///
+/// Thread-safety notes
+/// ───────────────────
+/// • SessionManager (session.zig) is thread-safe: a per-session mutex
+///   serialises turns within the same chat; different chats run in parallel.
+/// • `subagent_manager.current_channel / current_chat_id` are set per-job
+///   without a lock.  If two threads run concurrently they will race, but the
+///   worst outcome is one reflect result being routed to the wrong chat.  This
+///   is a known, acceptable trade-off until a per-session SubagentManager is
+///   implemented.
+/// • The `allocator` field is used to free() the reply returned by
+///   processMessage().  In ReleaseSmall (the production build mode) this is
+///   std.heap.smp_allocator which is thread-safe.
+const MsgJob = struct {
+    /// Main allocator — used to free processMessage reply. Thread-safe in prod.
+    allocator: std.mem.Allocator,
+    tg: *telegram.TelegramChannel,
+    session_mgr: *session_mod.SessionManager,
+    subagent_manager: *subagent_mod.SubagentManager,
+    sender: []u8,   // owned (c_allocator), freed by thread
+    content: []u8,  // owned (c_allocator), freed by thread
+    reply_to_id: ?i64,
+
+    pub fn run(ctx: *MsgJob) void {
+        defer {
+            std.heap.c_allocator.free(ctx.sender);
+            std.heap.c_allocator.free(ctx.content);
+            std.heap.c_allocator.destroy(ctx);
+        }
+
+        var typing = telegram.TypingIndicator.init(ctx.tg);
+        typing.start(ctx.sender);
+
+        // Update subagent routing (best-effort under concurrent load).
+        ctx.subagent_manager.current_channel = "telegram";
+        ctx.subagent_manager.current_chat_id = ctx.sender;
+
+        var key_buf: [128]u8 = undefined;
+        const session_key = std.fmt.bufPrint(&key_buf, "telegram:{s}", .{ctx.sender}) catch ctx.sender;
+
+        const reply = ctx.session_mgr.processMessage(session_key, ctx.content) catch |err| {
+            typing.stop();
+            log.err("message thread: agent error: {}", .{err});
+            const err_text: []const u8 = switch (err) {
+                error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+                error.OutOfMemory => "Out of memory.",
+                else => "An error occurred. Try again or /new for a fresh session.",
+            };
+            ctx.tg.sendMessageWithReply(ctx.sender, err_text, ctx.reply_to_id) catch |e|
+                log.err("failed to send error reply: {}", .{e});
+            return;
+        };
+        defer ctx.allocator.free(reply);
+
+        typing.stop();
+        ctx.tg.sendMessageWithReply(ctx.sender, reply, ctx.reply_to_id) catch |err|
+            log.warn("message thread: send error: {}", .{err});
+    }
+};
+
+/// Allocate a MsgJob and spawn a detached thread to process the message.
+/// Returns true on success; caller should fall back to inline processing on false.
+fn spawnMsgJob(
+    allocator: std.mem.Allocator,
+    tg: *telegram.TelegramChannel,
+    runtime: *ChannelRuntime,
+    sender: []const u8,
+    content: []const u8,
+    reply_to_id: ?i64,
+) bool {
+    const ctx = std.heap.c_allocator.create(MsgJob) catch return false;
+
+    ctx.* = .{
+        .allocator = allocator,
+        .tg = tg,
+        .session_mgr = &runtime.session_mgr,
+        .subagent_manager = runtime.subagent_manager,
+        .sender = std.heap.c_allocator.dupe(u8, sender) catch {
+            std.heap.c_allocator.destroy(ctx);
+            return false;
+        },
+        .content = std.heap.c_allocator.dupe(u8, content) catch {
+            std.heap.c_allocator.free(ctx.sender);
+            std.heap.c_allocator.destroy(ctx);
+            return false;
+        },
+        .reply_to_id = reply_to_id,
+    };
+
+    const t = std.Thread.spawn(.{ .stack_size = 512 * 1024 }, MsgJob.run, .{ctx}) catch {
+        std.heap.c_allocator.free(ctx.sender);
+        std.heap.c_allocator.free(ctx.content);
+        std.heap.c_allocator.destroy(ctx);
+        return false;
+    };
+    t.detach();
+    return true;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // runTelegramLoop — polling thread function
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -186,7 +292,6 @@ pub fn runTelegramLoop(
     tg_ptr.setMyCommands();
     tg_ptr.dropPendingUpdates();
 
-    var typing = telegram.TypingIndicator.init(tg_ptr);
     var evict_counter: u32 = 0;
 
     const model = config.default_model orelse "anthropic/claude-sonnet-4";
@@ -206,7 +311,7 @@ pub fn runTelegramLoop(
         loop_state.last_activity.store(std.time.timestamp(), .release);
 
         for (messages) |msg| {
-            // Handle /start command
+            // Handle /start command inline (fast, no LLM call)
             const trimmed = std.mem.trim(u8, msg.content, " \t\r\n");
             if (std.mem.eql(u8, trimmed, "/start")) {
                 var greeting_buf: [512]u8 = undefined;
@@ -220,35 +325,39 @@ pub fn runTelegramLoop(
             const use_reply_to = msg.is_group or telegram_config.reply_in_private;
             const reply_to_id: ?i64 = if (use_reply_to) msg.message_id else null;
 
-            // Session key
-            var key_buf: [128]u8 = undefined;
-            const session_key = std.fmt.bufPrint(&key_buf, "telegram:{s}", .{msg.sender}) catch msg.sender;
+            // Spawn a thread for this message so the poll loop stays responsive.
+            // If spawn fails (OOM / too many threads), fall back to inline processing.
+            if (!spawnMsgJob(allocator, tg_ptr, runtime, msg.sender, msg.content, reply_to_id)) {
+                // Inline fallback: same logic as before threading was added.
+                log.warn("spawnMsgJob failed; processing inline for sender={s}", .{msg.sender});
 
-            // Update subagent routing so spawn/reflect results go back to this chat
-            runtime.subagent_manager.current_channel = "telegram";
-            runtime.subagent_manager.current_chat_id = msg.sender;
+                runtime.subagent_manager.current_channel = "telegram";
+                runtime.subagent_manager.current_chat_id = msg.sender;
 
-            // Typing indicator
-            typing.start(msg.sender);
+                var key_buf: [128]u8 = undefined;
+                const session_key = std.fmt.bufPrint(&key_buf, "telegram:{s}", .{msg.sender}) catch msg.sender;
 
-            const reply = runtime.session_mgr.processMessage(session_key, msg.content) catch |err| {
-                typing.stop();
-                log.err("Agent error: {}", .{err});
-                const err_msg: []const u8 = switch (err) {
-                    error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
-                    error.OutOfMemory => "Out of memory.",
-                    else => "An error occurred. Try again or /new for a fresh session.",
+                var typing_fb = telegram.TypingIndicator.init(tg_ptr);
+                typing_fb.start(msg.sender);
+
+                const reply = runtime.session_mgr.processMessage(session_key, msg.content) catch |err| {
+                    typing_fb.stop();
+                    log.err("Agent error (inline): {}", .{err});
+                    const err_msg: []const u8 = switch (err) {
+                        error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+                        error.OutOfMemory => "Out of memory.",
+                        else => "An error occurred. Try again or /new for a fresh session.",
+                    };
+                    tg_ptr.sendMessageWithReply(msg.sender, err_msg, reply_to_id) catch |send_err| log.err("failed to send error reply: {}", .{send_err});
+                    continue;
                 };
-                tg_ptr.sendMessageWithReply(msg.sender, err_msg, reply_to_id) catch |send_err| log.err("failed to send error reply: {}", .{send_err});
-                continue;
-            };
-            defer allocator.free(reply);
+                defer allocator.free(reply);
 
-            typing.stop();
-
-            tg_ptr.sendMessageWithReply(msg.sender, reply, reply_to_id) catch |err| {
-                log.warn("Send error: {}", .{err});
-            };
+                typing_fb.stop();
+                tg_ptr.sendMessageWithReply(msg.sender, reply, reply_to_id) catch |err| {
+                    log.warn("Send error (inline): {}", .{err});
+                };
+            }
         }
 
         if (messages.len > 0) {

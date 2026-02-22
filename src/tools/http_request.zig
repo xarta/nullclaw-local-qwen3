@@ -53,15 +53,16 @@ pub const HttpRequestTool = struct {
             }
         }
 
-        // Validate method
-        const method = validateMethod(method_str) orelse {
+        // Validate method (curl receives the method string; we still gate here
+        // so we return a consistent error before any subprocess is spawned).
+        if (validateMethod(method_str) == null) {
             const msg = try std.fmt.allocPrint(allocator, "Unsupported HTTP method: {s}", .{method_str});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
-        };
+        }
 
-        // Build URI
-        const uri = std.Uri.parse(url) catch
-            return ToolResult.fail("Invalid URL format");
+        // Validate URL structure for an early "Invalid URL format" error.
+        const uri = std.Uri.parse(url) catch return ToolResult.fail("Invalid URL format");
+        _ = uri; // validation only; curl accepts the raw URL string directly
 
         // Parse custom headers from ObjectMap
         const headers_val = root.getValue(args, "headers");
@@ -97,62 +98,95 @@ pub const HttpRequestTool = struct {
             header_list.deinit(allocator);
         }
 
-        // Execute request using std.http.Client (Zig 0.15 API)
-        var client: std.http.Client = .{ .allocator = allocator };
-        defer client.deinit();
-
+        // Execute request via curl subprocess.
+        // Zig 0.15 std.http.Client has TLS reliability issues on Alpine musl
+        // (error.EndOfStream on HTTPS). curl is installed in the runtime image
+        // and uses the system CA bundle (ca-certificates + update-ca-certificates).
         const body: ?[]const u8 = root.getString(args, "body");
 
-        // Build extra headers
-        var extra_headers_buf: [32]std.http.Header = undefined;
-        var extra_count: usize = 0;
+        // Sentinel appended by curl -w; allows us to slice status code off the
+        // end of the combined stdout result without a temp file.
+        const status_sentinel = "\n<<<HTTP_SC>>>";
+
+        // Build "Key: Value" header strings for -H args; freed after subprocess.
+        var header_strs: std.ArrayList([]u8) = .{};
+        defer {
+            for (header_strs.items) |s| allocator.free(s);
+            header_strs.deinit(allocator);
+        }
         for (custom_headers) |h| {
-            if (extra_count >= extra_headers_buf.len) break;
-            extra_headers_buf[extra_count] = .{ .name = h[0], .value = h[1] };
-            extra_count += 1;
+            const hs = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ h[0], h[1] });
+            try header_strs.append(allocator, hs);
         }
 
-        var req = client.request(method, uri, .{
-            .extra_headers = extra_headers_buf[0..extra_count],
-        }) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "HTTP request failed: {}", .{err});
-            return ToolResult{ .success = false, .output = "", .error_msg = msg };
-        };
-        defer req.deinit();
+        // Argv: curl -s -w SENTINEL -X METHOD [-H key:val]... [--data-raw body] URL
+        const max_argc: usize = 8 + (header_strs.items.len * 2) + 2 + 1;
+        const argv = try allocator.alloc([]const u8, max_argc);
+        defer allocator.free(argv);
+        var argc: usize = 0;
 
-        // Send body if present, otherwise send bodiless
+        argv[argc] = "curl";     argc += 1;
+        argv[argc] = "-s";       argc += 1;
+        argv[argc] = "-w";       argc += 1;
+        argv[argc] = status_sentinel ++ "%{http_code}"; argc += 1;
+        argv[argc] = "-X";       argc += 1;
+        argv[argc] = method_str; argc += 1;
+
+        for (header_strs.items) |hs| {
+            argv[argc] = "-H"; argc += 1;
+            argv[argc] = hs;   argc += 1;
+        }
+
         if (body) |b| {
-            const body_dup = try allocator.dupe(u8, b);
-            defer allocator.free(body_dup);
-            req.sendBodyComplete(body_dup) catch |err| {
-                const msg = try std.fmt.allocPrint(allocator, "Failed to send body: {}", .{err});
-                return ToolResult{ .success = false, .output = "", .error_msg = msg };
-            };
-        } else {
-            req.sendBodiless() catch |err| {
-                const msg = try std.fmt.allocPrint(allocator, "Failed to send request: {}", .{err});
-                return ToolResult{ .success = false, .output = "", .error_msg = msg };
-            };
+            argv[argc] = "--data-raw"; argc += 1;
+            argv[argc] = b;            argc += 1;
         }
 
-        // Receive response head
-        var redirect_buf: [4096]u8 = undefined;
-        var response = req.receiveHead(&redirect_buf) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "Failed to receive response: {}", .{err});
+        argv[argc] = url; argc += 1;
+
+        var child = std.process.Child.init(argv[0..argc], allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+
+        child.spawn() catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "Failed to launch curl: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };
 
-        const status_code = @intFromEnum(response.head.status);
+        const raw_output = child.stdout.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch {
+            _ = child.wait() catch {};
+            return ToolResult.fail("Failed to read curl stdout");
+        };
+        defer allocator.free(raw_output);
+
+        // Always heap-allocated so we can unconditionally free it below.
+        const stderr_output = child.stderr.?.readToEndAlloc(allocator, 64 * 1024) catch
+            try allocator.dupe(u8, "");
+        defer allocator.free(stderr_output);
+
+        const term = child.wait() catch return ToolResult.fail("curl process wait failed");
+        switch (term) {
+            .Exited => |code| if (code != 0) {
+                const msg = if (stderr_output.len > 0)
+                    try std.fmt.allocPrint(allocator, "curl failed (exit {d}): {s}", .{ code, stderr_output })
+                else
+                    try std.fmt.allocPrint(allocator, "curl failed with exit code {d}", .{code});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            },
+            else => return ToolResult.fail("curl process terminated abnormally"),
+        }
+
+        // Parse HTTP status code from end of output.
+        // Output format: <body>\n<<<HTTP_SC>>><three-digit code>
+        const sentinel_pos = std.mem.lastIndexOf(u8, raw_output, status_sentinel) orelse
+            return ToolResult.fail("Could not parse HTTP status (sentinel missing from curl output)");
+
+        const response_body = raw_output[0..sentinel_pos];
+        const status_str = std.mem.trim(u8, raw_output[sentinel_pos + status_sentinel.len ..], " \t\r\n");
+        const status_code = std.fmt.parseInt(u16, status_str, 10) catch
+            return ToolResult.fail("Could not parse HTTP status code from curl output");
+
         const success = status_code >= 200 and status_code < 300;
-
-        // Read response body (limit to 1MB)
-        var transfer_buf: [8192]u8 = undefined;
-        const reader = response.reader(&transfer_buf);
-        const response_body = reader.readAlloc(allocator, 1_048_576) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "Failed to read response body: {}", .{err});
-            return ToolResult{ .success = false, .output = "", .error_msg = msg };
-        };
-        defer allocator.free(response_body);
 
         // Build redacted headers display for custom request headers
         const redacted = redactHeadersForDisplay(allocator, custom_headers) catch "";
