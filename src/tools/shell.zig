@@ -12,8 +12,14 @@ const DEFAULT_SHELL_TIMEOUT_NS: u64 = 60 * std.time.ns_per_s;
 /// Default maximum output size in bytes (1MB).
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576;
 /// Environment variables safe to pass to shell commands.
+/// System/locale vars are here for functional reasons; SPEEDTEST_* are
+/// deliberately included so the agent can use them in http_request headers
+/// and network checks.  LLM credentials (LITELLM_API_KEY, etc.) are
+/// intentionally excluded (CWE-200 mitigation).
 const SAFE_ENV_VARS = [_][]const u8{
     "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
+    // Speedtest skill — app-level credentials, safe to expose to shell.
+    "SPEEDTEST_URL", "SPEEDTEST_API_KEY", "SPEEDTEST_PING_TARGETS",
 };
 
 /// Shell command execution tool with workspace scoping.

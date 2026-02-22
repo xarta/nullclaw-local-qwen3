@@ -82,9 +82,17 @@ pub const HttpRequestTool = struct {
                         .string => |s| s,
                         else => continue,
                     };
+                    // Expand bare $VAR_NAME references in header values so the
+                    // model can pass e.g. {"X-API-Key": "$SPEEDTEST_API_KEY"}
+                    // without needing a separate shell lookup first.
+                    // Only expands whole-value references (entire value == $NAME).
+                    const effective_val: []const u8 = if (val_str.len > 1 and val_str[0] == '$') blk: {
+                        const var_name = val_str[1..];
+                        break :blk std.posix.getenv(var_name) orelse val_str;
+                    } else val_str;
                     try header_list.append(allocator, .{
                         try allocator.dupe(u8, entry.key_ptr.*),
-                        try allocator.dupe(u8, val_str),
+                        try allocator.dupe(u8, effective_val),
                     });
                 }
             }
