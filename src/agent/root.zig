@@ -631,23 +631,23 @@ pub const Agent = struct {
                         const reflect_task = std.fmt.allocPrint(
                             self.allocator,
                             "[Reflection task]\n" ++
-                                "Review the assistant's last response for ALL of the following issues:\n\n" ++
-                                "1. ANNOUNCE-WITHOUT-EXECUTE (most important): Did the assistant " ++
-                                "explicitly say it would perform an action or call a tool — e.g., " ++
-                                "'I will now check...', 'Let me look up...', 'Let\u{2019}s proceed with that', " ++
+                                "You are reviewing the assistant's last response for ONE specific issue:\n\n" ++
+                                "ANNOUNCE-WITHOUT-EXECUTE: Did the assistant explicitly say it would " ++
+                                "perform an action or call a tool — e.g. 'I will now check...', " ++
+                                "'Let me look up...', 'Let\u{2019}s proceed with that', " ++
                                 "'I will use the shell command...' — but then STOP without actually " ++
-                                "calling any tool? If so, this MUST be flagged.\n" ++
-                                "2. Factual errors or incorrect information in the response.\n" ++
-                                "3. Missed implications or unhinted-at user needs.\n\n" ++
+                                "calling any tool?\n\n" ++
+                                "IMPORTANT CONTEXT: The assistant may have answered correctly using " ++
+                                "information from session memory or prior tool calls — do NOT flag " ++
+                                "factual assertions as errors just because you cannot see how they " ++
+                                "were obtained. Only flag unfulfilled action promises.\n\n" ++
                                 "Conversation context:\n[User]: {s}\n[Assistant]: {s}\n\n" ++
-                                "Respond AS the assistant in first person. " ++
-                                "IMPORTANT: you have no tools \u{2014} never promise to execute an action. " ++
-                                "Apologise and suggest what the user should ask next instead. Examples:\n" ++
-                                "'I apologise \u{2014} I announced I would check X but never called the tool. " ++
-                                "Please ask me again and I will do it immediately.'\n" ++
-                                "'I realise I missed...'\n" ++
-                                "'I remember now \u{2014} ...'\n" ++
-                                "If nothing is wrong or worth flagging, output only the word LGTM.",
+                                "If the assistant announced an action but called no tool, respond AS " ++
+                                "the assistant in first person — apologise and tell the user what to " ++
+                                "ask next. Example:\n" ++
+                                "'I apologise \u{2014} I announced I would check X but never called " ++
+                                "the tool. Please ask me again and I will do it immediately.'\n" ++
+                                "If there is no unfulfilled action promise, output only the word LGTM.",
                             .{ user_message, final_text },
                         ) catch null;
                         if (reflect_task) |rt| {
