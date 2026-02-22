@@ -316,6 +316,11 @@ pub const Agent = struct {
         var iter_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer iter_arena.deinit();
 
+        // Track whether any tool was called this turn; used for the announce-detect nudge.
+        var any_tool_called: bool = false;
+        // Allow at most one nudge per turn to prevent infinite loops.
+        var nudge_done: bool = false;
+
         var iteration: u32 = 0;
         while (iteration < self.max_tool_iterations) : (iteration += 1) {
             _ = iter_arena.reset(.retain_capacity);
@@ -541,6 +546,45 @@ pub const Agent = struct {
             const display_text = if (parsed_text.len > 0) parsed_text else response_text;
 
             if (parsed_calls.len == 0) {
+                // ── Announce-detect nudge ─────────────────────────────────
+                // If a tool was called earlier this turn and the model just
+                // produced text announcing what it WILL do (without calling
+                // a tool), inject a nudge and give it one more iteration.
+                // Only done once per turn (nudge_done guards re-entry).
+                if (any_tool_called and !nudge_done) {
+                    const txt = if (parsed_text.len > 0) parsed_text else response_text;
+                    // Allocate a lower-case copy for pattern matching; skip nudge on OOM.
+                    const lower_buf = iter_arena.allocator().alloc(u8, txt.len) catch null;
+                    const is_announce: bool = if (lower_buf) |lb| check: {
+                        const lower = std.ascii.lowerString(lb, txt);
+                        break :check std.mem.indexOf(u8, lower, "i will") != null or
+                            std.mem.indexOf(u8, lower, "i'll") != null or
+                            std.mem.indexOf(u8, lower, "let me") != null or
+                            std.mem.indexOf(u8, lower, "let's proceed") != null or
+                            std.mem.indexOf(u8, lower, "i need to") != null or
+                            std.mem.indexOf(u8, lower, "i should") != null;
+                    } else false;
+                    if (is_announce) {
+                        log.warn("announce-detect: model announced action without calling tool, nudging (iter={d})", .{iteration});
+                        // Record assistant text in history so the nudge has context.
+                        try self.history.append(self.allocator, .{
+                            .role = .assistant,
+                            .content = try self.allocator.dupe(u8, txt),
+                        });
+                        try self.history.append(self.allocator, .{
+                            .role = .user,
+                            .content = try self.allocator.dupe(
+                                u8,
+                                "You described an action you intend to take but did not call any tool. " ++
+                                    "Please call the appropriate tool now to carry out the task.",
+                            ),
+                        });
+                        self.freeResponseFields(&response);
+                        nudge_done = true;
+                        continue;
+                    }
+                }
+
                 // No tool calls — final response
                 const final_text = if (self.context_was_compacted) blk: {
                     self.context_was_compacted = false;
@@ -641,6 +685,7 @@ pub const Agent = struct {
             });
 
             // Execute each tool call
+            any_tool_called = true;
             var results_buf: std.ArrayListUnmanaged(ToolExecutionResult) = .empty;
             defer results_buf.deinit(self.allocator);
             try results_buf.ensureTotalCapacity(self.allocator, parsed_calls.len);

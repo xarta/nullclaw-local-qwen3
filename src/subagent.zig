@@ -351,12 +351,28 @@ pub const SubagentManager = struct {
         // Route result via bus (outside lock)
         if (self.bus) |b| {
             log.info("subagent: publishing result to outbound bus (channel={s} chat={s})", .{ origin_channel, origin_chat_id });
-            const content = if (owned_result) |r|
-                std.fmt.allocPrint(self.allocator, "[Subagent '{s}' completed]\n{s}", .{ label, r }) catch return
-            else if (owned_err) |e|
-                std.fmt.allocPrint(self.allocator, "[Subagent '{s}' failed]\n{s}", .{ label, e }) catch return
-            else
-                std.fmt.allocPrint(self.allocator, "[Subagent '{s}' finished]", .{label}) catch return;
+            // For auto-reflect, the result IS the correction — no label wrapper needed
+            // (the label wrapper is noise for the user). For other subagents, keep it.
+            const is_auto_reflect = std.mem.startsWith(u8, label, "auto-reflect");
+            const content = blk: {
+                if (owned_result) |r| {
+                    // Strip trailing LGTM that the model sometimes appends after a correction.
+                    const stripped_r = std.mem.trimRight(u8, r, " \t\r\n");
+                    const without_trailing_lgtm = if (std.mem.endsWith(u8, stripped_r, "LGTM"))
+                        std.mem.trimRight(u8, stripped_r[0 .. stripped_r.len - 4], " \t\r\n")
+                    else
+                        stripped_r;
+                    if (is_auto_reflect) {
+                        break :blk std.fmt.allocPrint(self.allocator, "{s}", .{without_trailing_lgtm}) catch return;
+                    } else {
+                        break :blk std.fmt.allocPrint(self.allocator, "[Subagent '{s}' completed]\n{s}", .{ label, without_trailing_lgtm }) catch return;
+                    }
+                } else if (owned_err) |e| {
+                    break :blk std.fmt.allocPrint(self.allocator, "[Subagent '{s}' failed]\n{s}", .{ label, e }) catch return;
+                } else {
+                    break :blk std.fmt.allocPrint(self.allocator, "[Subagent '{s}' finished]", .{label}) catch return;
+                }
+            };
 
             const msg = bus_mod.makeOutbound(
                 self.allocator,
