@@ -638,9 +638,11 @@ pub const Agent = struct {
                                 "2. Factual errors or incorrect information in the response.\n" ++
                                 "3. Missed implications or unhinted-at user needs.\n\n" ++
                                 "Conversation context:\n[User]: {s}\n[Assistant]: {s}\n\n" ++
-                                "Respond AS the assistant in first person. Examples:\n" ++
-                                "'I should correct myself \u{2014} I said I would check X but never " ++
-                                "called any tool. I will do it now.'\n" ++
+                                "Respond AS the assistant in first person. " ++
+                                "IMPORTANT: you have no tools \u{2014} never promise to execute an action. " ++
+                                "Apologise and suggest what the user should ask next instead. Examples:\n" ++
+                                "'I apologise \u{2014} I announced I would check X but never called the tool. " ++
+                                "Please ask me again and I will do it immediately.'\n" ++
                                 "'I realise I missed...'\n" ++
                                 "'I remember now \u{2014} ...'\n" ++
                                 "If nothing is wrong or worth flagging, output only the word LGTM.",

@@ -407,7 +407,34 @@ fn subagentThreadFn(ctx: *ThreadContext) void {
 
     log.info("subagent '{s}' (task {d}): thread started, routing to {s}/{s}", .{ ctx.label, ctx.task_id, ctx.origin_channel, ctx.origin_chat_id });
 
-    const system_prompt = "You are a background subagent. Complete the assigned task concisely and accurately. You have no access to interactive tools — focus on reasoning and analysis.";
+    // Pick the system prompt based on the subagent's purpose.
+    // Reflection subagents (auto-reflect, reflect tool) must never promise to
+    // execute actions — they can only reason and apologise.
+    // General worker subagents (spawn tool) are task-oriented thinkers that
+    // analyse, summarise, or reason but also have no tools.
+    const is_reflection = std.mem.startsWith(u8, ctx.label, "reflect") or
+        std.mem.startsWith(u8, ctx.label, "auto-reflect");
+
+    const system_prompt: []const u8 = if (is_reflection)
+        "You are a background reflection assistant. Your ONLY job is to reason " ++
+        "about the conversation and produce a short correction or observation in " ++
+        "first person. " ++
+        "CRITICAL RULES:\n" ++
+        "1. You have NO tools. You cannot run commands, make HTTP requests, read " ++
+        "files, or execute anything whatsoever.\n" ++
+        "2. NEVER promise to perform an action. Do NOT say 'I will now...', " ++
+        "'Let me...', 'I will do it now', 'I will proceed to...', or any phrase " ++
+        "implying you will take action. You physically cannot.\n" ++
+        "3. When the assistant announced an action without calling a tool, " ++
+        "apologise concisely and tell the USER what to ask next. For example: " ++
+        "'I apologise — I said I would check X but did not call any tool. " ++
+        "Please ask me again and I will call it immediately.'\n" ++
+        "4. If nothing needs correcting, output only the single word LGTM."
+    else
+        "You are a background worker assistant. Analyse the given task carefully " ++
+        "and produce a thorough, well-reasoned response. " ++
+        "You have no tools — you cannot execute commands, make HTTP requests, or " ++
+        "read files. Focus entirely on reasoning, analysis, and written output.";
 
     var cfg_arena = std.heap.ArenaAllocator.init(ctx.manager.allocator);
     defer cfg_arena.deinit();
