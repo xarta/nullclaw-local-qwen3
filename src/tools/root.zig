@@ -625,7 +625,8 @@ test "all tools includes extras when enabled" {
         // Free all heap-allocated tool structs (mix of types)
         // Order: shell, file_read, file_write, file_edit, git, image_info,
         //        memory_store, memory_recall, memory_forget, delegate, schedule,
-        //        http_request, browser
+        //        remind_me, spawn, reflect, web_search, web_fetch,
+        //        http_request, browser, tool_help
         std.testing.allocator.destroy(@as(*shell.ShellTool, @ptrCast(@alignCast(tools[0].ptr))));
         std.testing.allocator.destroy(@as(*file_read.FileReadTool, @ptrCast(@alignCast(tools[1].ptr))));
         std.testing.allocator.destroy(@as(*file_write.FileWriteTool, @ptrCast(@alignCast(tools[2].ptr))));
@@ -640,15 +641,18 @@ test "all tools includes extras when enabled" {
         std.testing.allocator.destroy(@as(*remind_me.RemindMeTool, @ptrCast(@alignCast(tools[11].ptr))));
         std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[12].ptr))));
         std.testing.allocator.destroy(@as(*reflect.ReflectTool, @ptrCast(@alignCast(tools[13].ptr))));
-        std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[14].ptr))));
-        std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[15].ptr))));
-        std.testing.allocator.destroy(@as(*tool_help.ToolHelpTool, @ptrCast(@alignCast(tools[16].ptr))));
+        std.testing.allocator.destroy(@as(*web_search.WebSearchTool, @ptrCast(@alignCast(tools[14].ptr))));
+        std.testing.allocator.destroy(@as(*web_fetch.WebFetchTool, @ptrCast(@alignCast(tools[15].ptr))));
+        std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[16].ptr))));
+        std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[17].ptr))));
+        std.testing.allocator.destroy(@as(*tool_help.ToolHelpTool, @ptrCast(@alignCast(tools[18].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
     // + memory_store + memory_recall + memory_forget + delegate + schedule
-    // + remind_me + spawn + reflect + http_request + browser + tool_help = 17
-    try std.testing.expectEqual(@as(usize, 17), tools.len);
+    // + remind_me + spawn + reflect + web_search + web_fetch
+    // + http_request + browser + tool_help = 19
+    try std.testing.expectEqual(@as(usize, 19), tools.len);
 }
 
 test "all tools excludes extras when disabled" {
@@ -656,7 +660,8 @@ test "all tools excludes extras when disabled" {
     defer {
         // Free all heap-allocated tool structs
         // Order: shell, file_read, file_write, file_edit, git, image_info,
-        //        memory_store, memory_recall, memory_forget, delegate, schedule
+        //        memory_store, memory_recall, memory_forget, delegate, schedule,
+        //        remind_me, spawn, reflect, web_search, web_fetch, tool_help
         std.testing.allocator.destroy(@as(*shell.ShellTool, @ptrCast(@alignCast(tools[0].ptr))));
         std.testing.allocator.destroy(@as(*file_read.FileReadTool, @ptrCast(@alignCast(tools[1].ptr))));
         std.testing.allocator.destroy(@as(*file_write.FileWriteTool, @ptrCast(@alignCast(tools[2].ptr))));
@@ -671,13 +676,15 @@ test "all tools excludes extras when disabled" {
         std.testing.allocator.destroy(@as(*remind_me.RemindMeTool, @ptrCast(@alignCast(tools[11].ptr))));
         std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[12].ptr))));
         std.testing.allocator.destroy(@as(*reflect.ReflectTool, @ptrCast(@alignCast(tools[13].ptr))));
-        std.testing.allocator.destroy(@as(*tool_help.ToolHelpTool, @ptrCast(@alignCast(tools[14].ptr))));
+        std.testing.allocator.destroy(@as(*web_search.WebSearchTool, @ptrCast(@alignCast(tools[14].ptr))));
+        std.testing.allocator.destroy(@as(*web_fetch.WebFetchTool, @ptrCast(@alignCast(tools[15].ptr))));
+        std.testing.allocator.destroy(@as(*tool_help.ToolHelpTool, @ptrCast(@alignCast(tools[16].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
     // + memory_store + memory_recall + memory_forget + delegate + schedule + remind_me + spawn
-    // + reflect + tool_help = 15
-    try std.testing.expectEqual(@as(usize, 15), tools.len);
+    // + reflect + web_search + web_fetch + tool_help = 17
+    try std.testing.expectEqual(@as(usize, 17), tools.len);
 }
 
 test {
