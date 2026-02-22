@@ -357,6 +357,16 @@ pub fn allTools(
     rft.* = .{ .manager = opts.subagent_manager };
     try list.append(allocator, rft.tool());
 
+    // Web tools — always enabled; SSRF protection built into web_fetch.
+    // web_search uses DDG by default (no key needed); Brave if BRAVE_API_KEY set.
+    const wst = try allocator.create(web_search.WebSearchTool);
+    wst.* = .{};
+    try list.append(allocator, wst.tool());
+
+    const wft = try allocator.create(web_fetch.WebFetchTool);
+    wft.* = .{ .default_max_chars = tc.web_fetch_max_chars };
+    try list.append(allocator, wft.tool());
+
     if (opts.http_enabled) {
         const ht = try allocator.create(http_request.HttpRequestTool);
         ht.* = .{};
