@@ -20,6 +20,8 @@ const SAFE_ENV_VARS = [_][]const u8{
     "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
     // Speedtest skill — app-level credentials, safe to expose to shell.
     "SPEEDTEST_URL", "SPEEDTEST_API_KEY", "SPEEDTEST_PING_TARGETS",
+    // Web search — optional Brave Search API key.
+    "BRAVE_API_KEY",
 };
 
 /// Shell command execution tool with workspace scoping.

@@ -49,49 +49,50 @@ pub const WebFetchTool = struct {
 
         const max_chars = parseMaxCharsWithDefault(args, self.default_max_chars);
 
-        // Fetch URL
-        var client: std.http.Client = .{ .allocator = allocator };
-        defer client.deinit();
+        // Validate URL format early (before launching subprocess).
+        const uri = std.Uri.parse(url) catch return ToolResult.fail("Invalid URL format");
+        _ = uri; // validation only; curl accepts the raw URL string directly
 
-        const uri = std.Uri.parse(url) catch
-            return ToolResult.fail("Invalid URL format");
-
-        var req = client.request(.GET, uri, .{
-            .extra_headers = &.{
-                .{ .name = "User-Agent", .value = "nullclaw/0.1 (web_fetch tool)" },
-                .{ .name = "Accept", .value = "text/html,application/json,text/plain,*/*" },
-            },
-        }) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "Fetch failed: {}", .{err});
-            return ToolResult{ .success = false, .output = "", .error_msg = msg };
+        // Fetch URL via curl subprocess.
+        // Zig 0.15 std.http.Client has TLS reliability issues on Alpine musl
+        // (error.EndOfStream on HTTPS). curl is installed in the runtime image.
+        const fetch_argv = [_][]const u8{
+            "curl", "-s", "-L",
+            "-A", "Mozilla/5.0 (compatible; nullclaw/0.1 web_fetch)",
+            "--max-time", "30",
+            "--max-filesize", "2097152",
+            url,
         };
-        defer req.deinit();
+        var child = std.process.Child.init(&fetch_argv, allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
 
-        req.sendBodiless() catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "Failed to send request: {}", .{err});
-            return ToolResult{ .success = false, .output = "", .error_msg = msg };
-        };
-
-        var redirect_buf: [4096]u8 = undefined;
-        var response = req.receiveHead(&redirect_buf) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "Failed to receive response: {}", .{err});
+        child.spawn() catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "Failed to launch curl: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };
 
-        const status_code = @intFromEnum(response.head.status);
-        if (status_code < 200 or status_code >= 400) {
-            const msg = try std.fmt.allocPrint(allocator, "HTTP {d}", .{status_code});
-            return ToolResult{ .success = false, .output = "", .error_msg = msg };
-        }
-
-        // Read body (limit to 2MB)
-        var transfer_buf: [8192]u8 = undefined;
-        const reader = response.reader(&transfer_buf);
-        const body = reader.readAlloc(allocator, 2 * 1024 * 1024) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "Failed to read response: {}", .{err});
-            return ToolResult{ .success = false, .output = "", .error_msg = msg };
+        const body = child.stdout.?.readToEndAlloc(allocator, 2 * 1024 * 1024) catch {
+            _ = child.wait() catch {};
+            return ToolResult.fail("Failed to read curl output");
         };
         defer allocator.free(body);
+
+        const fetch_stderr = child.stderr.?.readToEndAlloc(allocator, 16 * 1024) catch
+            try allocator.dupe(u8, "");
+        defer allocator.free(fetch_stderr);
+
+        const fetch_term = child.wait() catch return ToolResult.fail("curl process wait failed");
+        switch (fetch_term) {
+            .Exited => |code| if (code != 0) {
+                const msg = if (fetch_stderr.len > 0)
+                    try std.fmt.allocPrint(allocator, "curl failed (exit {d}): {s}", .{ code, fetch_stderr })
+                else
+                    try std.fmt.allocPrint(allocator, "Fetch failed with curl exit code {d}", .{code});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            },
+            else => return ToolResult.fail("curl process terminated abnormally"),
+        }
 
         // Extract text from HTML
         const extracted = try htmlToText(allocator, body);
