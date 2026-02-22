@@ -150,10 +150,30 @@ pub const SessionManager = struct {
     /// Process a message within a session context.
     /// Finds or creates the session, locks it, runs agent.turn(), returns owned response.
     pub fn processMessage(self: *SessionManager, session_key: []const u8, content: []const u8) ![]const u8 {
+        return self.processMessageWithContext(session_key, content, "system", "agent");
+    }
+
+    /// Like processMessage but also stamps origin_channel / origin_chat_id on
+    /// the session's Agent so that auto-reflect routes corrections to the right
+    /// conversation.  Call this from channel-specific message handlers to
+    /// prevent the race condition where a second concurrent MsgJob overwrites
+    /// the shared SubagentManager.current_channel/chat_id values.
+    pub fn processMessageWithContext(
+        self: *SessionManager,
+        session_key: []const u8,
+        content: []const u8,
+        origin_channel: []const u8,
+        origin_chat_id: []const u8,
+    ) ![]const u8 {
         const session = try self.getOrCreate(session_key);
 
         session.mutex.lock();
         defer session.mutex.unlock();
+
+        // Stamp routing info on the per-session agent before the LLM call so
+        // auto-reflect uses the correct channel/chat even under concurrent load.
+        session.agent.origin_channel = origin_channel;
+        session.agent.origin_chat_id = origin_chat_id;
 
         const response = try session.agent.turn(content);
         session.turn_count += 1;

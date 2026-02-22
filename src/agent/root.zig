@@ -72,6 +72,13 @@ pub const Agent = struct {
     /// pure-text turns.  Injected externally; not owned by Agent.
     subagent_manager: ?*subagent_mod.SubagentManager = null,
 
+    /// Channel and chat ID for the current message, used by auto-reflect to
+    /// route corrections back to the right conversation.  Set per-message by
+    /// the caller (e.g. MsgJob) before calling turn(). Owned by the caller —
+    /// Agent does NOT free these.
+    origin_channel: []const u8 = "system",
+    origin_chat_id: []const u8 = "agent",
+
     /// Optional streaming callback. When set, turn() uses streamChat() for streaming providers.
     stream_callback: ?providers.StreamCallback = null,
     /// Context pointer passed to stream_callback.
@@ -309,6 +316,11 @@ pub const Agent = struct {
         var iter_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer iter_arena.deinit();
 
+        // Track whether any tool was called this turn; used for the announce-detect nudge.
+        var any_tool_called: bool = false;
+        // Allow at most one nudge per turn to prevent infinite loops.
+        var nudge_done: bool = false;
+
         var iteration: u32 = 0;
         while (iteration < self.max_tool_iterations) : (iteration += 1) {
             _ = iter_arena.reset(.retain_capacity);
@@ -534,6 +546,45 @@ pub const Agent = struct {
             const display_text = if (parsed_text.len > 0) parsed_text else response_text;
 
             if (parsed_calls.len == 0) {
+                // ── Announce-detect nudge ─────────────────────────────────
+                // If a tool was called earlier this turn and the model just
+                // produced text announcing what it WILL do (without calling
+                // a tool), inject a nudge and give it one more iteration.
+                // Only done once per turn (nudge_done guards re-entry).
+                if (any_tool_called and !nudge_done) {
+                    const txt = if (parsed_text.len > 0) parsed_text else response_text;
+                    // Allocate a lower-case copy for pattern matching; skip nudge on OOM.
+                    const lower_buf = iter_arena.allocator().alloc(u8, txt.len) catch null;
+                    const is_announce: bool = if (lower_buf) |lb| check: {
+                        const lower = std.ascii.lowerString(lb, txt);
+                        break :check std.mem.indexOf(u8, lower, "i will") != null or
+                            std.mem.indexOf(u8, lower, "i'll") != null or
+                            std.mem.indexOf(u8, lower, "let me") != null or
+                            std.mem.indexOf(u8, lower, "let's proceed") != null or
+                            std.mem.indexOf(u8, lower, "i need to") != null or
+                            std.mem.indexOf(u8, lower, "i should") != null;
+                    } else false;
+                    if (is_announce) {
+                        log.warn("announce-detect: model announced action without calling tool, nudging (iter={d})", .{iteration});
+                        // Record assistant text in history so the nudge has context.
+                        try self.history.append(self.allocator, .{
+                            .role = .assistant,
+                            .content = try self.allocator.dupe(u8, txt),
+                        });
+                        try self.history.append(self.allocator, .{
+                            .role = .user,
+                            .content = try self.allocator.dupe(
+                                u8,
+                                "You described an action you intend to take but did not call any tool. " ++
+                                    "Please call the appropriate tool now to carry out the task.",
+                            ),
+                        });
+                        self.freeResponseFields(&response);
+                        nudge_done = true;
+                        continue;
+                    }
+                }
+
                 // No tool calls — final response
                 const final_text = if (self.context_was_compacted) blk: {
                     self.context_was_compacted = false;
@@ -569,28 +620,39 @@ pub const Agent = struct {
                 self.freeResponseFields(&response);
 
                 // ── Auto-reflect ─────────────────────────────────────────────
-                // After a pure-text turn (no tool calls), silently spawn a
-                // background thinking subagent to check for missed errors or
-                // implicit user intent.  The result is published to the chat
-                // only when it finds something worth surfacing (non-LGTM).
+                // Only fires on PURE-TEXT turns where no tools were called at
+                // all.  If any tool ran this turn the agent has already done
+                // real work — there is no "announce without execute" to catch,
+                // and the final text may include forward-looking phrasing like
+                // "Would you like to proceed?" that a naive prompt would
+                // mis-classify as an unexecuted promise.
                 if (self.subagent_manager) |mgr| {
-                    if (!mgr.reflect_in_flight and final_text.len > 20) {
+                    if (!mgr.reflect_in_flight and !any_tool_called and final_text.len > 20) {
                         const reflect_task = std.fmt.allocPrint(
                             self.allocator,
                             "[Reflection task]\n" ++
-                                "Question: Review the assistant's last response. " ++
-                                "Were there any factual errors, missed implications, " ++
-                                "or things the user was hinting at that weren't addressed?\n\n" ++
+                                "You are reviewing the assistant's last response for ONE specific issue:\n\n" ++
+                                "ANNOUNCE-WITHOUT-EXECUTE: Did the assistant explicitly say it would " ++
+                                "perform an action or call a tool — e.g. 'I will now check...', " ++
+                                "'Let me look up...', 'Let\u{2019}s proceed with that', " ++
+                                "'I will use the shell command...' — but then STOP without actually " ++
+                                "calling any tool?\n\n" ++
+                                "IMPORTANT CONTEXT: The assistant may have answered correctly using " ++
+                                "information from session memory or prior tool calls — do NOT flag " ++
+                                "factual assertions as errors just because you cannot see how they " ++
+                                "were obtained. Only flag unfulfilled action promises.\n\n" ++
                                 "Conversation context:\n[User]: {s}\n[Assistant]: {s}\n\n" ++
-                                "Respond AS the assistant in first person — for example: " ++
-                                "'I should correct myself \u{2014} ...', 'I realise I missed...', " ++
-                                "'I remember now \u{2014} ...'. " ++
-                                "If nothing is wrong or worth flagging, output only the word LGTM.",
+                                "If the assistant announced an action but called no tool, respond AS " ++
+                                "the assistant in first person — apologise and tell the user what to " ++
+                                "ask next. Example:\n" ++
+                                "'I apologise \u{2014} I announced I would check X but never called " ++
+                                "the tool. Please ask me again and I will do it immediately.'\n" ++
+                                "If there is no unfulfilled action promise, output only the word LGTM.",
                             .{ user_message, final_text },
                         ) catch null;
                         if (reflect_task) |rt| {
                             defer self.allocator.free(rt);
-                            _ = mgr.spawn(rt, "auto-reflect", mgr.current_channel, mgr.current_chat_id, .{
+                            _ = mgr.spawn(rt, "auto-reflect", self.origin_channel, self.origin_chat_id, .{
                                 .thinking_override = true,
                                 .suppress_lgtm = true,
                             }) catch {};
@@ -627,6 +689,7 @@ pub const Agent = struct {
             });
 
             // Execute each tool call
+            any_tool_called = true;
             var results_buf: std.ArrayListUnmanaged(ToolExecutionResult) = .empty;
             defer results_buf.deinit(self.allocator);
             try results_buf.ensureTotalCapacity(self.allocator, parsed_calls.len);
