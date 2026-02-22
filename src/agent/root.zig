@@ -620,12 +620,14 @@ pub const Agent = struct {
                 self.freeResponseFields(&response);
 
                 // ── Auto-reflect ─────────────────────────────────────────────
-                // After a pure-text turn (no tool calls), silently spawn a
-                // background thinking subagent to check for missed errors or
-                // implicit user intent.  The result is published to the chat
-                // only when it finds something worth surfacing (non-LGTM).
+                // Only fires on PURE-TEXT turns where no tools were called at
+                // all.  If any tool ran this turn the agent has already done
+                // real work — there is no "announce without execute" to catch,
+                // and the final text may include forward-looking phrasing like
+                // "Would you like to proceed?" that a naive prompt would
+                // mis-classify as an unexecuted promise.
                 if (self.subagent_manager) |mgr| {
-                    if (!mgr.reflect_in_flight and final_text.len > 20) {
+                    if (!mgr.reflect_in_flight and !any_tool_called and final_text.len > 20) {
                         const reflect_task = std.fmt.allocPrint(
                             self.allocator,
                             "[Reflection task]\n" ++
